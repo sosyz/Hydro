@@ -4,10 +4,9 @@ import UserSelectAutoComplete from 'vj/components/autocomplete/UserSelectAutoCom
 import { ActionDialog, ConfirmDialog } from 'vj/components/dialog';
 import Notification from 'vj/components/notification';
 import { NamedPage } from 'vj/misc/Page';
-import delay from 'vj/utils/delay';
-import i18n from 'vj/utils/i18n';
-import request from 'vj/utils/request';
-import tpl from 'vj/utils/tpl';
+import {
+  delay, i18n, request, tpl,
+} from 'vj/utils';
 
 const page = new NamedPage('domain_user', () => {
   const addUserSelector = UserSelectAutoComplete.getOrConstruct($('.dialog__body--add-user [name="user"]'));
@@ -20,7 +19,7 @@ const page = new NamedPage('domain_user', () => {
           addUserSelector.focus();
           return false;
         }
-        if ($role.val() === '') {
+        if (!$role.val()) {
           $role.focus();
           return false;
         }
@@ -28,9 +27,10 @@ const page = new NamedPage('domain_user', () => {
       return true;
     },
   });
+  const firstRoleForAddUser = addUserDialog.$dom.find('[name="role"] option').first().val();
   addUserDialog.clear = function () {
     addUserSelector.clear();
-    this.$dom.find('[name="role"]').val('');
+    this.$dom.find('[name="role"]').val(firstRoleForAddUser);
     return this;
   };
 
@@ -38,15 +38,16 @@ const page = new NamedPage('domain_user', () => {
     $body: $('.dialog__body--set-role > div'),
     onDispatch(action) {
       const $role = setRolesDialog.$dom.find('[name="role"]');
-      if (action === 'ok' && $role.val() === '') {
+      if (action === 'ok' && !$role.val()) {
         $role.focus();
         return false;
       }
       return true;
     },
   });
+  const firstRoleForSetRole = setRolesDialog.$dom.find('[name="role"] option').first().val();
   setRolesDialog.clear = function () {
-    this.$dom.find('[name="role"]').val('');
+    this.$dom.find('[name="role"]').val(firstRoleForSetRole);
     return this;
   };
 
@@ -72,7 +73,7 @@ const page = new NamedPage('domain_user', () => {
   function ensureAndGetSelectedUsers() {
     const users = _.map(
       $('.domain-users tbody [type="checkbox"]:checked'),
-      (ch) => $(ch).closest('tr').attr('data-uid'),
+      (ch) => $(ch).attr('data-uid') || $(ch).closest('tr').attr('data-uid'),
     );
     if (users.length === 0) {
       Notification.error(i18n('Please select at least one user to perform this operation.'));

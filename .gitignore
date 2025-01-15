@@ -6,7 +6,6 @@ dist/
 /build/*.js
 .cache/
 *.log
-*.d.ts
 *.js.map
 *.tsbuildinfo
 *.hydro
@@ -28,7 +27,9 @@ globalConfig.json
 /config.yaml
 /config.json
 yarn.lock
+pnpm-lock.yaml
 tsconfig.json
+tsconfig.*.json
 
 # Project Rules
 ## Core
@@ -36,8 +37,7 @@ packages/**/*.js
 !/build/*.js
 !**/bin/*.js
 !*.page.js
-!/install/jssh.d.ts
-!packages/utils/lib/register.js
+!packages/register/index.js
 ## ui-default
 !packages/ui-default/**/*.js
 !packages/geoip/download.js
@@ -46,6 +46,7 @@ packages/ui-default/public
 packages/ui-default/misc/.iconfont
 packages/ui-default/static/locale
 plugins/
+modules/
 
 # Data files
 *.mmdb
@@ -56,3 +57,8 @@ __*
 !__mocks__
 !.gitkeep
 *.local
+
+# Monokle
+.monokle
+
+packages/*/public/assets

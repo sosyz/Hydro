@@ -1,7 +1,6 @@
 /* eslint-disable @typescript-eslint/no-use-before-define */
-import { ObjectID } from 'mongodb';
+import { ObjectId } from 'mongodb';
 import Schema from 'schemastery';
-import { addScript } from '../loader';
 import blacklist from '../model/blacklist';
 import * as discussion from '../model/discussion';
 import * as document from '../model/document';
@@ -10,7 +9,7 @@ import db from '../service/db';
 
 async function _address(
     ip: string,
-    bset: Set<string>, uset: Set<number>, dset: Set<ObjectID>,
+    bset: Set<string>, uset: Set<number>, dset: Set<ObjectId>,
     dryrun: boolean, report: Function,
 ) {
     if (bset.has(ip)) return;
@@ -26,8 +25,8 @@ async function _address(
 }
 
 async function _discussion(
-    domainId: string, did: ObjectID,
-    bset: Set<string>, uset: Set<number>, dset: Set<ObjectID>,
+    domainId: string, did: ObjectId,
+    bset: Set<string>, uset: Set<number>, dset: Set<ObjectId>,
     dryrun: boolean, report: Function,
 ) {
     if (dset.has(did)) return;
@@ -42,7 +41,7 @@ async function _discussion(
 
 async function _user(
     uid: number,
-    bset: Set<string>, uset: Set<number>, dset: Set<ObjectID>,
+    bset: Set<string>, uset: Set<number>, dset: Set<ObjectId>,
     dryrun: boolean, report: Function,
 ) {
     if (uset.has(uid)) return;
@@ -61,8 +60,9 @@ async function _user(
     if (!dryrun) await UserModel.ban(uid);
 }
 
-addScript('blacklist', 'Add blacklist by ip, uid')
-    .args(Schema.object({
+export const apply = (ctx) => ctx.addScript(
+    'blacklist', 'Add blacklist by ip, uid',
+    Schema.object({
         address: Schema.string(),
         discuss: Schema.object({
             domainId: Schema.string(),
@@ -70,17 +70,18 @@ addScript('blacklist', 'Add blacklist by ip, uid')
         }),
         user: Schema.number(),
         dryrun: Schema.boolean(),
-    }))
-    .action(async ({
+    }),
+    async ({
         address = null, discuss = null, user = null, dryrun = true,
     }, report) => {
         if (address) await _address(address, new Set(), new Set(), new Set(), dryrun, report);
         if (discuss) {
             await _discussion(
-                discuss.domainId, new ObjectID(discuss.did),
+                discuss.domainId, new ObjectId(discuss.did),
                 new Set(), new Set(), new Set(), dryrun, report,
             );
         }
         if (user) await _user(user, new Set(), new Set(), new Set(), dryrun, report);
         return true;
-    });
+    },
+);

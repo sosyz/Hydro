@@ -6,7 +6,7 @@ export function parse(output: string, fullscore: number) {
     let status = STATUS.STATUS_WRONG_ANSWER;
     let score = 0;
     let builder = (msg: string) => msg;
-    let message = output.substring(0, 1024);
+    let message = `${output.substring(0, 1024)} `;
     if (output.startsWith('ok ')) {
         status = STATUS.STATUS_ACCEPTED;
         score = fullscore;
@@ -29,8 +29,7 @@ export function parse(output: string, fullscore: number) {
         if (p === 1) {
             status = STATUS.STATUS_ACCEPTED;
             score = fullscore;
-            const base = output.replace('points ', '') || '';
-            message = base.substring(base.indexOf(' '), 1024);
+            message = output.replace(/^points [\d.]+ /, '') || '';
         } else score = Math.floor(fullscore * p);
     }
     while (operation.test(message)) {

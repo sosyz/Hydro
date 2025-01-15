@@ -1,6 +1,6 @@
-export function buildProjection(fields: string[]): Record<string, 1> {
-    const o = {};
-    for (const k of fields) o[k] = 1;
+export function buildProjection<T extends string | number = string>(fields: readonly T[]): Record<T, true> {
+    const o: Record<T, true> = Object.create(null);
+    for (const k of fields) o[k] = true;
     return o;
 }
 
@@ -14,6 +14,12 @@ export const log2 = (val: bigint | number) => {
 
 export function ArgMethod(target: any, funcName: string, obj: any) {
     return obj;
+}
+
+export function unwrapExports(module: any) {
+    return (!module || typeof module !== 'object') ? module
+        : 'apply' in module && typeof module.apply === 'function' ? module
+            : 'default' in module ? module.default : module;
 }
 
 export * from '@hydrooj/utils/lib/utils';

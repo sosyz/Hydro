@@ -16,17 +16,17 @@ export default async function readYamlCases(cfg: Record<string, any> = {}, check
             if (!cfg.checker.includes('.')) {
                 config.checker = findFileSync(`@hydrooj/hydrojudge/vendor/testlib/checkers/${cfg.checker}.cpp`, false);
             }
-            if (!config.checker) config.checker = checkFile(cfg.checker, 'Cannot find checker {0}.');
+            config.checker ||= checkFile(cfg.checker, 'Cannot find checker {0}.');
         }
         if (cfg.interactor) config.interactor = checkFile(cfg.interactor, 'Cannot find interactor {0}.');
         if (cfg.validator) config.validator = checkFile(cfg.validator, 'Cannot find validator {0}.');
-        ['judge', 'user'].forEach((n) => {
+        for (const n of ['judge', 'user']) {
             const conf = cfg[`${n}_extra_files`];
-            if (!conf) return;
+            if (!conf) continue;
             if (conf instanceof Array) {
                 config[`${n}_extra_files`] = conf.map((file) => checkFile(file, `Cannot find ${n} extra file {0}.`));
             } else throw new Error(`Invalid ${n}_extra_files config.`);
-        });
+        }
     }
     if (cfg.cases?.length) {
         config.subtasks = [{
@@ -44,10 +44,10 @@ export function convertIniConfig(ini: string) {
     const count = parseInt(f[0], 10);
     const res = { subtasks: [] };
     for (let i = 1; i <= count; i++) {
-        if (!f[i] || !f[i].trim()) throw new Error('Testcada count incorrect.');
+        if (!f[i]?.trim()) throw new Error('Testdata count incorrect.');
         const [input, output, time, score, memory] = f[i].split('|');
         const cur = {
-            cases: [{ input: `input/${input.toLowerCase()}`, output: `output/${output.toLowerCase()}` }],
+            cases: [{ input, output }],
             score: parseInt(score, 10),
             time: `${time}s`,
             memory: '256m',

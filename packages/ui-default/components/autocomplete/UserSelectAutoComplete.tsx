@@ -1,12 +1,10 @@
-import { assign } from 'lodash';
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import DOMAttachedObject from 'vj/components/DOMAttachedObject';
 import AutoComplete, { AutoCompleteOptions } from '.';
 import UserSelectAutoCompleteFC from './components/UserSelectAutoComplete';
 
 const Component = React.forwardRef<any, any>((props, ref) => {
-  const [value, setValue] = React.useState(props.value);
+  const [value, setValue] = React.useState(props.value ?? '');
   return (
     <UserSelectAutoCompleteFC
       ref={ref as any}
@@ -49,5 +47,4 @@ export default class UserSelectAutoComplete<Multi extends boolean> extends AutoC
   }
 }
 
-assign(UserSelectAutoComplete, DOMAttachedObject);
 window.Hydro.components.UserSelectAutoComplete = UserSelectAutoComplete;

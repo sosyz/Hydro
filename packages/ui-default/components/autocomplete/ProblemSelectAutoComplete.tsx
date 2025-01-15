@@ -1,12 +1,10 @@
-import { assign } from 'lodash';
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import DOMAttachedObject from 'vj/components/DOMAttachedObject';
 import AutoComplete from '.';
 import ProblemSelectAutoCompleteFC from './components/ProblemSelectAutoComplete';
 
 const Component = React.forwardRef<any, any>((props, ref) => {
-  const [value, setValue] = React.useState(props.value);
+  const [value, setValue] = React.useState(props.value ?? '');
   return (
     <ProblemSelectAutoCompleteFC
       ref={ref as any}
@@ -44,5 +42,4 @@ export default class ProblemSelectAutoComplete extends AutoComplete {
   }
 }
 
-assign(ProblemSelectAutoComplete, DOMAttachedObject);
 window.Hydro.components.ProblemSelectAutoComplete = ProblemSelectAutoComplete;

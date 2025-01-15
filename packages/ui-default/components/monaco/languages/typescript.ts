@@ -7,7 +7,7 @@ const diagnosticsOptions: monaco.languages.typescript.DiagnosticsOptions = {
   noSyntaxValidation: false,
   noSuggestionDiagnostics: true,
 };
-const compilerOptions = {
+const compilerOptions: monaco.languages.typescript.CompilerOptions = {
   target: monaco.languages.typescript.ScriptTarget.ES2020,
   module: monaco.languages.typescript.ModuleKind.ESNext,
   allowNonTsExtensions: true,
@@ -24,7 +24,8 @@ const libUri = 'ts:filename/basic.d.ts';
 monaco.languages.typescript.javascriptDefaults.addExtraLib(libSource, libUri);
 monaco.editor.createModel(libSource, 'typescript', monaco.Uri.parse(libUri));
 const modules = [];
-(async () => {
+
+export async function loadTypes() {
   for (const key of types.keys()) {
     if (!key.startsWith('.')) continue;
     const m = await types(key);
@@ -41,4 +42,4 @@ const modules = [];
   val += '((id:string)=>any)';
   monaco.languages.typescript.javascriptDefaults.addExtraLib(val, 'ts:node/require.d.ts');
   monaco.editor.createModel(val, 'typescript', monaco.Uri.parse('ts:node/require.d.ts'));
-})();
+}

@@ -6,12 +6,6 @@
       <div class="section__body">
         <form method="post">
           <div class="row">
-            <div class="medium-7 columns">
-              <label>
-                {{ _('Title') }}
-                <input name="title" placeholder="{{ _('title') }}" value="{{ pdoc['title']|default('') }}" class="textbox"{% if page_name == 'problem_create' %} autofocus{% endif %}>
-              </label>
-            </div>
             <div class="medium-3 columns">
               <label>
                 {{ _('pid') }}
@@ -21,11 +15,17 @@
                 </label>
               </label>
             </div>
+            <div class="medium-7 columns">
+              <label>
+                {{ _('Title') }}
+                <input name="title" placeholder="{{ _('title') }}" value="{{ pdoc['title']|default('') }}" class="textbox"{% if page_name == 'problem_create' %} autofocus{% endif %}>
+              </label>
+            </div>
             <div class="medium-2 columns">
               <label>
                 <br>
                 <label class="checkbox">
-                  <input type="checkbox" name="hidden" value="on"{% if pdoc['hidden'] %} checked{% endif %}>{{ _('Hidden') }}
+                  <input type="checkbox" name="hidden" value="on"{% if pdoc['hidden'] %} checked{% endif %} class="checkbox">{{ _('Hidden') }}
                 </label>
               </label>
             </div>
@@ -33,19 +33,11 @@
           <div class="row">
           {{ form.form_text({
                row:false,
-               columns:6,
+               columns:9,
                label:'Tags',
                help_text:'Split by \', \'.',
                name:'tag',
                value:pdoc['tag']|default([])|join(', ')
-             }) }}
-          {{ form.form_text({
-               row:false,
-               columns:3,
-               label:'Assign',
-               placeholder:_('Group / UID'),
-               name:'assign',
-               value:pdoc.assign|default([])|join(', ')
              }) }}
           {{ form.form_text({
                row:false,
@@ -71,7 +63,6 @@
           <div><textarea data-editor{% if page_name == 'problem_edit' %} autofocus{% endif %} class="textbox auto-resize nojs--hide"></textarea></div>
           <textarea name="content" class="textbox hasjs--hide" data-markdown-upload style="height: 500px">{% if pdoc %}{{ pdoc['content']|toString }}{% else %}{% include 'partials/problem_default.md' %}{% endif %}</textarea>
           <div class="row"><div class="columns">
-            <input type="hidden" name="csrfToken" value="{{ handler.csrfToken }}">
           {% if page_name == 'problem_edit' %}
             <button type="submit" class="rounded primary button">
               {{ _('Update') }}
@@ -101,8 +92,25 @@
       </div>
     </div>
     {% if page_name == 'problem_edit' %}
-      {% include "partials/problem_sidebar_additional_file.html" %}
-      {% set owner_udoc = udoc %}
+      <div class="section side">
+        <div class="section__header">
+          <h1 class="section__title">{{ additional_file.length|default(0) }} {{_('Additional File')}}</h1>
+        </div>
+        <ol class="menu">
+          <li class="menu__item flex-row">
+            <a class="menu__link half" href="javascript:;" name="additional_file__upload">
+              <span class="icon icon-upload"></span> {{ _('Upload') }}
+            </a>
+            <a class="menu__link half" href="javascript:;" name="additional_file__download">
+              <span class="icon icon-download"></span> {{ _('Download All') }}
+            </a>
+          </li>
+        </ol>
+        {% set sidebar = true %}
+        {% set can_edit = true %}
+        {% set filetype = "additional_file" %}
+        {% include "partials/problem_files.html" %}
+      </div>
       {% include "partials/problem_sidebar.html" %}
     {% else %}
       {% include 'components/md_hint.html' %}

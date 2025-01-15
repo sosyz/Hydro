@@ -1,19 +1,22 @@
-/* eslint-disable no-constant-condition */
 /* eslint-disable no-await-in-loop */
-import { ObjectID } from 'mongodb';
 import Schema from 'schemastery';
-import { addScript } from '../loader';
 import { STATUS } from '../model/builtin';
 import * as document from '../model/document';
+import RecordModel from '../model/record';
 import db from '../service/db';
 
 const sumStatus = (status) => ({ $sum: { $cond: [{ $eq: ['$status', status] }, 1, 0] } });
-const $match = { contest: { $ne: new ObjectID('000000000000000000000000') } };
 
 export async function udoc(report) {
     report({ message: 'Udoc' });
     const pipeline = [
-        { $match },
+        {
+            $match: {
+                contest: { $nin: [RecordModel.RECORD_PRETEST, RecordModel.RECORD_GENERATE] },
+                status: { $ne: STATUS.STATUS_CANCELED },
+                uid: { $gte: 0 },
+            },
+        },
         {
             $group: {
                 _id: { domainId: '$domainId', pid: '$pid', uid: '$uid' },
@@ -30,10 +33,8 @@ export async function udoc(report) {
         },
     ];
     let bulk = db.collection('domain.user').initializeUnorderedBulkOp();
-    const cursor = db.collection('record').aggregate(pipeline, { allowDiskUse: true });
-    while (true) {
-        const adoc = await cursor.next() as any;
-        if (!adoc) break;
+    const cursor = db.collection('record').aggregate<any>(pipeline, { allowDiskUse: true });
+    for await (const adoc of cursor) {
         bulk.find({
             domainId: adoc._id.domainId,
             uid: adoc._id.uid,
@@ -43,37 +44,23 @@ export async function udoc(report) {
                 nAccept: adoc.nAccept,
             },
         });
-        if (bulk.length > 100) {
+        if (bulk.batches.length > 100) {
             await bulk.execute();
             bulk = db.collection('domain.user').initializeUnorderedBulkOp();
         }
     }
-    if (bulk.length) await bulk.execute();
-}
-
-export async function psdoc(report) {
-    report({ message: 'Psdoc' });
-    const pipeline = [
-        { $match },
-        {
-            $group: {
-                _id: { domainId: '$domainId', pid: '$pid', uid: '$uid' },
-                nSubmit: { $sum: 1 },
-            },
-        },
-    ];
-    const data = db.collection('record').aggregate(pipeline, { allowDiskUse: true });
-    while (true) {
-        const adoc = await data.next() as any;
-        if (!adoc) break;
-        await document.setStatus(adoc._id.domainId, document.TYPE_PROBLEM, adoc._id.pid, adoc._id.uid, { nSubmit: adoc.nSubmit });
-    }
+    if (bulk.batches.length) await bulk.execute();
 }
 
 export async function pdoc(report) {
     report({ message: 'Pdoc' });
     const pipeline = [
-        { $match },
+        {
+            $match: {
+                contest: { $nin: [RecordModel.RECORD_PRETEST, RecordModel.RECORD_GENERATE] },
+                status: { $ne: STATUS.STATUS_CANCELED },
+            },
+        },
         {
             $group: {
                 _id: { domainId: '$domainId', pid: '$pid', uid: '$uid' },
@@ -118,11 +105,9 @@ export async function pdoc(report) {
         pipeline[2].$group[`s${i}`] = { $sum: `$s${i}` };
     }
     let bulk = db.collection('document').initializeUnorderedBulkOp();
-    const data = db.collection('record').aggregate(pipeline, { allowDiskUse: true });
+    const data = db.collection('record').aggregate<any>(pipeline, { allowDiskUse: true });
     let cnt = 0;
-    while (true) {
-        const adoc = await data.next() as any;
-        if (!adoc) break;
+    for await (const adoc of data) {
         const $set = {
             nSubmit: adoc.nSubmit,
             nAccept: adoc.nAccept,
@@ -143,25 +128,34 @@ export async function pdoc(report) {
             docType: document.TYPE_PROBLEM,
             docId: adoc._id.pid,
         }).updateOne({ $set });
-        if (bulk.length > 100) {
+        if (bulk.batches.length > 100) {
             await bulk.execute();
             cnt++;
             report({ message: `${cnt * 100} pdocs updated` });
             bulk = db.collection('document').initializeUnorderedBulkOp();
         }
     }
-    if (bulk.length) await bulk.execute();
+    if (bulk.batches.length) await bulk.execute();
 }
 
-addScript('problemStat', 'Recalculates nSubmit and nAccept in problem status.')
-    .args(Schema.object({
+export const apply = (ctx) => ctx.addScript(
+    'problemStat', 'Recalculates nSubmit and nAccept in problem status.',
+    Schema.object({
         udoc: Schema.boolean(),
         pdoc: Schema.boolean(),
         psdoc: Schema.boolean(),
-    }))
-    .action(async (arg, report) => {
-        if (arg.pdoc === undefined || arg.pdoc) await pdoc(report);
-        if (arg.udoc === undefined || arg.udoc) await udoc(report);
-        if (arg.psdoc === undefined || arg.psdoc) await psdoc(report);
+    }),
+    async (arg, report) => {
+        if (arg.pdoc === undefined || arg.pdoc) {
+            const start = Date.now();
+            await pdoc(report);
+            report({ message: `pdoc finished in ${Date.now() - start}ms` });
+        }
+        if (arg.udoc === undefined || arg.udoc) {
+            const start = Date.now();
+            await udoc(report);
+            report({ message: `udoc finished in ${Date.now() - start}ms` });
+        }
         return true;
-    });
+    },
+);

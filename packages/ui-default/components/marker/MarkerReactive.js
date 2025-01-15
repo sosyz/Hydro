@@ -1,7 +1,6 @@
 import $ from 'jquery';
-import _ from 'lodash';
 import DOMAttachedObject from 'vj/components/DOMAttachedObject';
-import delay from 'vj/utils/delay';
+import { delay } from 'vj/utils';
 import Marker from './Marker';
 
 export default class MarkerReactive extends DOMAttachedObject {
@@ -54,5 +53,3 @@ export default class MarkerReactive extends DOMAttachedObject {
     super.detach();
   }
 }
-
-_.assign(MarkerReactive, DOMAttachedObject);

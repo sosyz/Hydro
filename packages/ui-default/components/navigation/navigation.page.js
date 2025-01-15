@@ -1,13 +1,9 @@
 import $ from 'jquery';
 import Slideout from 'slideout';
-import UserSelectAutoComplete from 'vj/components/autocomplete/UserSelectAutoComplete';
-import { ActionDialog } from 'vj/components/dialog';
-import createHint from 'vj/components/hint';
 import Notification from 'vj/components/notification';
+import selectUser from 'vj/components/selectUser';
 import { AutoloadPage } from 'vj/misc/Page';
-import i18n from 'vj/utils/i18n';
-import request from 'vj/utils/request';
-import tpl from 'vj/utils/tpl';
+import { i18n, request, tpl } from 'vj/utils';
 
 function handleNavLogoutClick(ev) {
   const $logoutLink = $(ev.currentTarget);
@@ -17,46 +13,17 @@ function handleNavLogoutClick(ev) {
   ev.preventDefault();
 }
 
-function handlerSwitchAccount(ev) {
-  let userSelector;
-  const promise = new ActionDialog({
-    $body: tpl`
-      <div>
-        <div class="row"><div class="columns">
-          <h1 name="select_user_text">${i18n('Select User')}</h1>
-        </div></div>
-        <div class="row">
-          <div class="columns">
-            <label>
-              ${i18n('Username / UID')}
-              <input name="switch_account_target" type="text" class="textbox" autocomplete="off" data-autofocus>
-            </label>
-          </div>
-        </div>
-      </div>
-    `,
-    onDispatch(action) {
-      if (action === 'ok' && userSelector.value() === null) {
-        userSelector.focus();
-        return false;
-      }
-      return true;
-    },
-  }).open();
-  userSelector = UserSelectAutoComplete.getOrConstruct($('[name="switch_account_target"]'));
-  createHint('Hint::icon::switch_account', $('[name="select_user_text"]'));
-  promise.then(async (action) => {
-    if (action !== 'ok') return;
-    const target = userSelector.value();
-    if (!target) return;
-    try {
-      await request.get('/account', { uid: target._id });
-      window.location.reload();
-    } catch (error) {
-      Notification.error(error.message);
-    }
-  });
+async function handlerSwitchAccount(ev) {
   ev.preventDefault();
+  const target = await selectUser('Hint::icon::switch_account');
+  if (!target) return;
+  try {
+    const res = await request.get(`/account/${target._id}`);
+    if (res.url) window.location.href = res.url;
+    else window.location.reload();
+  } catch (error) {
+    Notification.error(error.message);
+  }
 }
 
 let $trigger;
@@ -139,6 +106,7 @@ const navigationPage = new AutoloadPage('navigationPage', () => {
 
   $('.header__hamburger').on('click', () => slideout.toggle());
   $(window).on('resize', handleNavbar);
+  setInterval(handleNavbar, 3000);
 }, () => {
   $trigger = $(tpl`
     <li class="nav__list-item nav_more" data-dropdown-pos="bottom right" data-dropdown-target="#menu-nav-more">

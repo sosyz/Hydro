@@ -2,22 +2,22 @@ import type * as monaco from 'monaco-editor';
 import React from 'react';
 import { connect } from 'react-redux';
 import { load } from 'vj/components/monaco/loader';
+import { ctx } from 'vj/context';
 
 interface ScratchpadOptions {
   value?: string;
   language?: string;
   handleUpdateCode?: (str: string, event: monaco.editor.IModelContentChangedEvent) => void;
-  mainSize?: number;
-  recordSize?: number;
-  pretestSize?: number;
+  settings?: any;
+  pendingCommand?: string;
+  commandDone?: () => void;
 }
 
 export default connect((state: any) => ({
   value: state.editor.code,
   language: window.LANGS[state.editor.lang]?.monaco,
-  mainSize: state.ui.main.size,
-  pretestSize: state.ui.pretest.size,
-  recordSize: state.ui.records.size,
+  settings: state.ui.settings.config,
+  pendingCommand: state.ui.pendingCommand,
 }), (dispatch) => ({
   handleUpdateCode: (code: string) => {
     dispatch({
@@ -25,8 +25,14 @@ export default connect((state: any) => ({
       payload: code,
     });
   },
+  commandDone: () => {
+    dispatch({
+      type: 'SCRATCHPAD_TRIGGER_EDITOR_COMMAND',
+      payload: { command: '' },
+    });
+  },
 }))(class MonacoEditor extends React.PureComponent<ScratchpadOptions> {
-  disposable = [];
+  disposable: monaco.IDisposable[] = [];
   __prevent_trigger_change_event = false;
   model: monaco.editor.ITextModel;
   editor: monaco.editor.IStandaloneCodeEditor;
@@ -36,17 +42,18 @@ export default connect((state: any) => ({
     const value = this.props.value || '';
     const { language } = this.props;
     const { monaco, registerAction, customOptions } = await load([language]);
-    const uri = monaco.Uri.parse(`hydro://${UiContext.pdoc.pid || UiContext.pdoc.docId}.${language}`);
+    const uri = monaco.Uri.parse(`hydro:${UiContext.pdoc.pid || UiContext.pdoc.docId}.${language}`);
     this.model = monaco.editor.getModel(uri) || monaco.editor.createModel(value, language, uri);
     if (this.containerElement) {
       const config: monaco.editor.IStandaloneEditorConstructionOptions = {
         theme: 'vs-light',
-        ...customOptions,
         fontFamily: UserContext.codeFontFamily,
+        ...customOptions,
         lineNumbers: 'on',
         glyphMargin: true,
-        lightbulb: { enabled: true },
+        lightbulb: { enabled: monaco.editor.ShowLightbulbIconMode.On },
         model: this.model,
+        fontLigatures: '',
       };
       this.editor = monaco.editor.create(this.containerElement, config);
       registerAction(this.editor, this.model);
@@ -59,13 +66,13 @@ export default connect((state: any) => ({
       );
       (window as any).editor = this.editor;
       (window as any).monaco = monaco;
-      window.Hydro.bus.emit('scratchpadEditorCreate', this.editor, monaco);
+      ctx.scratchpad.init(this.editor, monaco);
     }
   }
 
   async componentDidUpdate(prevProps) {
     const {
-      value, language, mainSize, recordSize, pretestSize,
+      value, language,
     } = this.props;
     const { monaco } = await load([language]);
     const { editor, model } = this;
@@ -78,7 +85,7 @@ export default connect((state: any) => ({
         [
           {
             range: model.getFullModelRange(),
-            text: value,
+            text: value!,
           },
         ],
         () => null,
@@ -89,14 +96,17 @@ export default connect((state: any) => ({
     if (model && editor && prevProps.language !== language) {
       const val = model.getValue(LF, false);
       model.dispose();
-      const uri = monaco.Uri.parse(`hydro://${UiContext.pdoc.pid || UiContext.pdoc.docId}.${language}`);
+      const uri = monaco.Uri.parse(`hydro:${UiContext.pdoc.pid || UiContext.pdoc.docId}.${language}`);
       this.model = monaco.editor.getModel(uri) || monaco.editor.createModel(val, language, uri);
       editor.setModel(this.model);
     }
-    if (editor) {
-      if (prevProps.mainSize !== mainSize
-        || prevProps.recordSize !== recordSize
-        || prevProps.pretestSize !== pretestSize) editor.layout();
+    if (editor && this.props.settings) {
+      editor.updateOptions(this.props.settings);
+    }
+    if (this.props.pendingCommand) {
+      editor.focus();
+      editor.getAction(this.props.pendingCommand)?.run();
+      this.props.commandDone();
     }
   }
 

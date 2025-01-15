@@ -1,14 +1,18 @@
 import { dirname, resolve } from 'path';
-import { Readable } from 'stream';
+import { PassThrough, Readable } from 'stream';
 import { URL } from 'url';
 import {
-    copyFile, createReadStream, ensureDir,
-    remove, stat, writeFile,
+    DeleteObjectCommand, DeleteObjectsCommand, GetObjectCommand,
+    HeadObjectCommand, PutObjectCommand, PutObjectCommandInput, S3Client,
+} from '@aws-sdk/client-s3';
+import { Upload } from '@aws-sdk/lib-storage';
+import { createPresignedPost } from '@aws-sdk/s3-presigned-post';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import {
+    copyFile, createReadStream, createWriteStream, ensureDir,
+    existsSync, remove, stat, writeFile,
 } from 'fs-extra';
 import { lookup } from 'mime-types';
-import {
-    BucketItem, Client, CopyConditions, ItemBucketMetadata,
-} from 'minio';
 import { Logger } from '../logger';
 import { builtinConfig } from '../settings';
 import { MaybeArray } from '../typeutils';
@@ -16,42 +20,6 @@ import { md5, streamToBuffer } from '../utils';
 
 const logger = new Logger('storage');
 
-interface StorageOptions {
-    endPoint: string;
-    accessKey: string;
-    secretKey: string;
-    bucket: string;
-    region?: string;
-    pathStyle: boolean;
-    endPointForUser?: string;
-    endPointForJudge?: string;
-}
-
-interface EndpointConfig {
-    endPoint: string;
-    port: number;
-    useSSL: boolean;
-}
-
-function parseMainEndpointUrl(endpoint: string): EndpointConfig {
-    if (!endpoint) throw new Error('Empty endpoint');
-    const url = new URL(endpoint);
-    const result: Partial<EndpointConfig> = {};
-    if (url.pathname !== '/') throw new Error('Main endpoint URL of a sub-directory is not supported.');
-    if (url.username || url.password || url.hash || url.search) {
-        throw new Error('Authorization, search parameters and hash are not supported for main endpoint URL.');
-    }
-    if (url.protocol === 'http:') result.useSSL = false;
-    else if (url.protocol === 'https:') result.useSSL = true;
-    else {
-        throw new Error(
-            `Invalid protocol "${url.protocol}" for main endpoint URL. Only HTTP and HTTPS are supported.`,
-        );
-    }
-    result.endPoint = url.hostname;
-    result.port = url.port ? Number(url.port) : result.useSSL ? 443 : 80;
-    return result as EndpointConfig;
-}
 function parseAlternativeEndpointUrl(endpoint: string): (originalUrl: string) => string {
     if (!endpoint) return (originalUrl) => originalUrl;
     const pathonly = endpoint.startsWith('/');
@@ -81,11 +49,23 @@ export function encodeRFC5987ValueChars(str: string) {
     );
 }
 
+const convertPath = (p: string) => {
+    p = p.trim();
+    if (p.includes('..') || p.includes('//') || p.endsWith('/.') || p === '.' || p.includes('/./')) {
+        throw new Error('Invalid path');
+    }
+    return p;
+};
+
 class RemoteStorageService {
-    public client: Client;
+    public client: S3Client;
     public error = '';
-    public opts: StorageOptions;
-    private replaceWithAlternativeUrlFor: Record<'user' | 'judge', (originalUrl: string) => string>;
+    public bucket = 'hydro';
+    private replaceWithAlternativeUrlFor: Partial<Record<'user' | 'judge', (originalUrl: string) => string>>;
+    private alternatives: Record<'user' | 'judge', S3Client> = {
+        user: null,
+        judge: null,
+    };
 
     async start() {
         try {
@@ -100,33 +80,36 @@ class RemoteStorageService {
                 endPointForUser,
                 endPointForJudge,
             } = builtinConfig.file;
-            this.opts = {
-                endPoint,
-                accessKey,
-                secretKey,
-                bucket,
+            this.bucket = bucket;
+            const base = {
                 region,
-                pathStyle,
-                endPointForUser,
-                endPointForJudge,
+                forcePathStyle: pathStyle,
+                credentials: {
+                    accessKeyId: accessKey,
+                    secretAccessKey: secretKey,
+                },
             };
-            this.client = new Client({
-                ...parseMainEndpointUrl(this.opts.endPoint),
-                pathStyle: this.opts.pathStyle,
-                accessKey: this.opts.accessKey,
-                secretKey: this.opts.secretKey,
+            this.client = new S3Client({
+                endpoint: endPoint,
+                ...base,
             });
-            try {
-                const exists = await this.client.bucketExists(this.opts.bucket);
-                if (!exists) await this.client.makeBucket(this.opts.bucket, this.opts.region);
-            } catch (e) {
-                // Some platform doesn't support bucketExists & makeBucket API.
-                // Ignore this error.
+            this.replaceWithAlternativeUrlFor = {};
+            if (/^https?:\/\//.test(endPointForUser)) {
+                this.alternatives.user = new S3Client({
+                    endpoint: endPointForUser,
+                    ...base,
+                });
+            } else {
+                this.replaceWithAlternativeUrlFor.user = parseAlternativeEndpointUrl(endPointForUser);
             }
-            this.replaceWithAlternativeUrlFor = {
-                user: parseAlternativeEndpointUrl(this.opts.endPointForUser),
-                judge: parseAlternativeEndpointUrl(this.opts.endPointForJudge),
-            };
+            if (/^https?:\/\//.test(endPointForJudge)) {
+                this.alternatives.judge = new S3Client({
+                    endpoint: endPointForJudge,
+                    ...base,
+                });
+            } else {
+                this.replaceWithAlternativeUrlFor.judge = parseAlternativeEndpointUrl(endPointForJudge);
+            }
             logger.success('Storage connected.');
             this.error = null;
         } catch (e) {
@@ -137,125 +120,143 @@ class RemoteStorageService {
         }
     }
 
-    async put(target: string, file: string | Buffer | Readable, meta: ItemBucketMetadata = {}) {
-        if (target.includes('..') || target.includes('//')) throw new Error('Invalid path');
+    async put(target: string, file: string | Buffer | Readable, meta: Record<string, string> = {}) {
+        target = convertPath(target);
         if (typeof file === 'string') file = createReadStream(file);
-        try {
-            await this.client.putObject(this.opts.bucket, target, file, meta);
-        } catch (e) {
-            e.stack = new Error().stack;
-            throw e;
+        const params: PutObjectCommandInput = {
+            Bucket: this.bucket,
+            Key: target,
+            Body: file,
+            Metadata: meta,
+            ContentType: meta['Content-Type'] || 'application/octet-stream',
+        };
+        if (file instanceof Buffer && file.byteLength <= 5 * 1024 * 1024) {
+            await this.client.send(new PutObjectCommand(params));
+        } else {
+            const upload = new Upload({
+                client: this.client,
+                params,
+                tags: [],
+                queueSize: 4,
+                partSize: 1024 * 1024 * 5,
+                leavePartsOnError: false,
+            });
+            await upload.done();
         }
     }
 
     async get(target: string, path?: string) {
-        if (target.includes('..') || target.includes('//')) throw new Error('Invalid path');
-        try {
-            if (path) return await this.client.fGetObject(this.opts.bucket, target, path);
-            return await this.client.getObject(this.opts.bucket, target);
-        } catch (e) {
-            e.stack = new Error().stack;
-            throw e;
+        target = convertPath(target);
+        const res = await this.client.send(new GetObjectCommand({
+            Bucket: this.bucket,
+            Key: target,
+        }));
+        if (!res.Body) throw new Error();
+        const stream = res.Body as Readable;
+        if (path) {
+            await new Promise((end, reject) => {
+                const file = createWriteStream(path);
+                stream.on('error', reject);
+                stream.on('end', () => {
+                    file.close();
+                    end(null);
+                });
+                stream.pipe(file);
+            });
+            return null;
         }
+        const p = new PassThrough();
+        stream.pipe(p);
+        return p;
     }
 
     async del(target: string | string[]) {
+        if (typeof target === 'string') target = convertPath(target);
+        else target = target.map(convertPath);
         if (typeof target === 'string') {
-            if (target.includes('..') || target.includes('//')) throw new Error('Invalid path');
-        } else if (target.find((t) => t.includes('..') || t.includes('//'))) throw new Error('Invalid path');
-        try {
-            if (typeof target === 'string') return await this.client.removeObject(this.opts.bucket, target);
-            return await this.client.removeObjects(this.opts.bucket, target);
-        } catch (e) {
-            e.stack = new Error().stack;
-            throw e;
+            return await this.client.send(new DeleteObjectCommand({
+                Bucket: this.bucket,
+                Key: target,
+            }));
         }
-    }
-
-    /** @deprecated use StorageModel.list instead. */
-    async list(target: string, recursive = true) {
-        if (target.includes('..') || target.includes('//')) throw new Error('Invalid path');
-        try {
-            const stream = this.client.listObjects(this.opts.bucket, target, recursive);
-            return await new Promise<BucketItem[]>((r, reject) => {
-                const results: BucketItem[] = [];
-                stream.on('data', (result) => {
-                    if (result.size) {
-                        results.push({
-                            ...result,
-                            prefix: target,
-                            name: result.name.split(target)[1],
-                        });
-                    }
-                });
-                stream.on('end', () => r(results));
-                stream.on('error', reject);
-            });
-        } catch (e) {
-            e.stack = new Error().stack;
-            throw e;
-        }
+        return await this.client.send(new DeleteObjectsCommand({
+            Bucket: this.bucket,
+            Delete: {
+                Objects: target.map((i) => ({ Key: i })),
+            },
+        }));
     }
 
     async getMeta(target: string) {
-        if (target.includes('..') || target.includes('//')) throw new Error('Invalid path');
-        try {
-            const result = await this.client.statObject(this.opts.bucket, target);
-            return { ...result.metaData, ...result };
-        } catch (e) {
-            e.stack = new Error().stack;
-            throw e;
-        }
-    }
-
-    async signDownloadLink(target: string, filename?: string, noExpire = false, useAlternativeEndpointFor?: 'user' | 'judge'): Promise<string> {
-        if (target.includes('..') || target.includes('//')) throw new Error('Invalid path');
-        try {
-            const headers: Record<string, string> = {};
-            if (filename) headers['response-content-disposition'] = `attachment; filename="${encodeRFC5987ValueChars(filename)}"`;
-            const url = await this.client.presignedGetObject(
-                this.opts.bucket,
-                target,
-                noExpire ? 24 * 60 * 60 * 7 : 10 * 60,
-                headers,
-            );
-            if (useAlternativeEndpointFor) return this.replaceWithAlternativeUrlFor[useAlternativeEndpointFor](url);
-            return url;
-        } catch (e) {
-            e.stack = new Error().stack;
-            throw e;
-        }
-    }
-
-    async signUpload(target: string, size: number) {
-        const policy = this.client.newPostPolicy();
-        policy.setBucket(this.opts.bucket);
-        policy.setKey(target);
-        policy.setExpires(new Date(Date.now() + 30 * 60 * 1000));
-        if (size) policy.setContentLengthRange(size - 50, size + 50);
-        const policyResult = await this.client.presignedPostPolicy(policy);
+        target = convertPath(target);
+        const res = await this.client.send(new HeadObjectCommand({
+            Bucket: this.bucket,
+            Key: target,
+        }));
         return {
-            url: this.replaceWithAlternativeUrlFor.user(policyResult.postURL),
-            extraFormData: policyResult.formData,
+            size: res.ContentLength,
+            lastModified: res.LastModified,
+            etag: res.ETag,
+            metaData: res.Metadata,
         };
     }
 
-    async copy(src: string, target: string) {
-        if (src.includes('..') || src.includes('//')) throw new Error('Invalid path');
-        if (target.includes('..') || target.includes('//')) throw new Error('Invalid path');
-        try {
-            const result = await this.client.copyObject(this.opts.bucket, target, src, new CopyConditions());
-            return result;
-        } catch (e) {
-            e.stack = new Error().stack;
-            throw e;
+    async signDownloadLink(target: string, filename?: string, noExpire = false, useAlternativeEndpointFor?: 'user' | 'judge'): Promise<string> {
+        target = convertPath(target);
+        const client = this.alternatives[useAlternativeEndpointFor] || this.client;
+        const url = await getSignedUrl(client, new GetObjectCommand({
+            Bucket: this.bucket,
+            Key: target,
+            ResponseContentDisposition: filename ? `attachment; filename="${encodeRFC5987ValueChars(filename)}"` : '',
+        }), {
+            // aliyun s3 will reject download if expires >= 7 days
+            expiresIn: noExpire ? 24 * 60 * 60 * 7 - 1 : 30 * 60,
+        });
+        // using something like /fs/
+        if (useAlternativeEndpointFor && this.replaceWithAlternativeUrlFor[useAlternativeEndpointFor]) {
+            return this.replaceWithAlternativeUrlFor[useAlternativeEndpointFor](url);
         }
+        return url;
+    }
+
+    async signUpload(target: string, size: number) {
+        const client = this.alternatives.user || this.client;
+        const { url, fields } = await createPresignedPost(client, {
+            Bucket: this.bucket,
+            Key: target,
+            Conditions: [
+                { $key: target },
+                { acl: 'public-read' },
+                { bucket: this.bucket },
+                ['content-length-range', size - 50, size + 50],
+            ],
+            Fields: {
+                acl: 'public-read',
+            },
+            Expires: 600,
+        });
+        if (this.replaceWithAlternativeUrlFor.user) {
+            return {
+                url: this.replaceWithAlternativeUrlFor.user(url),
+                fields,
+            };
+        }
+        return { url, fields };
+    }
+
+    async status() {
+        return {
+            type: 'S3',
+            status: !this.error,
+            error: this.error,
+            bucket: this.bucket,
+        };
     }
 }
 
 class LocalStorageService {
     client: null;
-    error: null;
+    error = '';
     dir: string;
     opts: null;
     private replaceWithAlternativeUrlFor: Record<'user' | 'judge', (originalUrl: string) => string>;
@@ -271,30 +272,27 @@ class LocalStorageService {
     }
 
     async put(target: string, file: string | Buffer | Readable) {
-        if (target.includes('..') || target.includes('//')) throw new Error('Invalid path');
-        target = resolve(this.dir, target);
+        target = resolve(this.dir, convertPath(target));
         await ensureDir(dirname(target));
         if (typeof file === 'string') await copyFile(file, target);
-        else if (file instanceof Buffer) await writeFile(target, file);
+        else if (Buffer.isBuffer(file)) await writeFile(target, file);
         else await writeFile(target, await streamToBuffer(file));
     }
 
     async get(target: string, path?: string) {
-        if (target.includes('..') || target.includes('//')) throw new Error('Invalid path');
-        target = resolve(this.dir, target);
+        target = resolve(this.dir, convertPath(target));
+        if (!existsSync(target)) throw new Error('File not found');
         if (path) await copyFile(target, path);
         return createReadStream(target);
     }
 
     async del(target: MaybeArray<string>) {
-        const targets = typeof target === 'string' ? [target] : target;
-        if (targets.find((i) => i.includes('..') || i.includes('//'))) throw new Error('Invalid path');
+        const targets = (typeof target === 'string' ? [target] : target).map(convertPath);
         await Promise.all(targets.map((i) => remove(resolve(this.dir, i))));
     }
 
     async getMeta(target: string) {
-        if (target.includes('..') || target.includes('//')) throw new Error('Invalid path');
-        target = resolve(this.dir, target);
+        target = resolve(this.dir, convertPath(target));
         const file = await stat(target);
         return {
             size: file.size,
@@ -310,7 +308,7 @@ class LocalStorageService {
     }
 
     async signDownloadLink(target: string, filename = '', noExpire = false, useAlternativeEndpointFor?: 'user' | 'judge'): Promise<string> {
-        if (target.includes('..') || target.includes('//')) throw new Error('Invalid path');
+        target = convertPath(target);
         const url = new URL('https://localhost/storage');
         url.searchParams.set('target', target);
         if (filename) url.searchParams.set('filename', filename);
@@ -325,17 +323,13 @@ class LocalStorageService {
         throw new Error('Not implemented');
     }
 
-    async list() {
-        throw new Error('deprecated');
-    }
-
-    async copy(src: string, target: string) {
-        if (src.includes('..') || src.includes('//')) throw new Error('Invalid path');
-        if (target.includes('..') || target.includes('//')) throw new Error('Invalid path');
-        src = resolve(this.dir, src);
-        target = resolve(this.dir, target);
-        await copyFile(src, target);
-        return { etag: target, lastModified: new Date() };
+    async status() {
+        return {
+            type: 'Local',
+            status: !this.error,
+            error: this.error,
+            bucket: 'Hydro',
+        };
     }
 }
 
