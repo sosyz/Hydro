@@ -1,26 +1,29 @@
 /* eslint-disable no-await-in-loop */
 import path from 'path';
-import fs from 'fs-extra';
-import yaml from 'js-yaml';
-import { max, sum } from 'lodash';
-import readYamlCases, { convertIniConfig } from '@hydrooj/utils/lib/cases';
-import { normalizeSubtasks, readSubtasksFromFiles } from '@hydrooj/utils/lib/common';
-import { changeErrorType } from '@hydrooj/utils/lib/utils';
-import { ProblemConfigFile } from 'hydrooj';
+import {
+    convertIniConfig, LangConfig, normalizeSubtasks, ProblemConfigFile, readSubtasksFromFiles,
+} from '@hydrooj/common';
+import { readYamlCases } from '@hydrooj/common/cases';
+import {
+    changeErrorType, fs, yaml,
+} from '@hydrooj/utils';
 import { getConfig } from './config';
 import { FormatError, SystemError } from './error';
 import { NextFunction, ParsedConfig } from './interface';
 import { ensureFile, parseMemoryMB } from './utils';
 
 function isValidConfig(config) {
-    if (config.count > (getConfig('testcases_max') || 100)) {
+    if (config.type !== 'objective' && config.count > (getConfig('testcases_max') || 100)) {
         throw new FormatError('Too many testcases. Cancelled.');
     }
-    const time = sum(config.subtasks.map((subtask) => sum(subtask.cases.map((c) => c.time))));
+    const time = (config.num_processes || 1) * Math.sum(...config.subtasks.flatMap((subtask) => subtask.cases.map((c) => c.time)));
     if (time > (getConfig('total_time_limit') || 60) * 1000) {
         throw new FormatError('Total time limit longer than {0}s. Cancelled.', [+getConfig('total_time_limit') || 60]);
     }
-    const memMax = max(config.subtasks.map((subtask) => max(subtask.cases.map((c) => c.memory))));
+    const memMax = Math.max(...config.subtasks.flatMap((subtask) => subtask.cases.map((c) => c.memory)));
+    if (config.type === 'communication' && (config.num_processes || 2) > getConfig('processLimit')) {
+        throw new FormatError('Number of processes larger than processLimit');
+    }
     if (memMax > parseMemoryMB(getConfig('memoryMax'))) throw new FormatError('Memory limit larger than memory_max');
     if (!['default', 'strict'].includes(config.checker_type || 'default') && !config.checker) {
         throw new FormatError('You did not specify a checker.');
@@ -38,36 +41,13 @@ async function collectFiles(folder: string) {
     return files;
 }
 
-export async function processTestdata(folder: string) {
-    let files = await fs.readdir(folder);
-    if (files.length <= 2) {
-        if (files.length === 2) files.splice(files.indexOf('version'), 1);
-        if (fs.statSync(path.resolve(folder, files[0])).isDirectory()) {
-            folder = path.resolve(folder, files[0]);
-            files = await fs.readdir(folder);
-        }
-    }
-    const ini = files.filter((i) => i.toLowerCase() === 'config.ini')[0];
-    if (!ini) return;
-    const t = await fs.readFile(path.resolve(folder, ini), 'utf8');
-    await fs.writeFile(path.resolve(folder, 'config.ini'), t.toLowerCase());
-    for (const i of files) {
-        if (i.toLowerCase() === 'input') await fs.rename(`${folder}/${i}`, `${folder}/input`);
-        if (i.toLowerCase() === 'output') await fs.rename(`${folder}/${i}`, `${folder}/output`);
-    }
-    await Promise.all(['input', 'output'].flatMap(async (f) => {
-        const dir = path.resolve(folder, f);
-        const sf = await fs.readdir(dir);
-        return sf
-            .filter((i) => i !== i.toLowerCase())
-            .map((i) => fs.rename(`${dir}/${i}`, `${dir}/${i.toLowerCase()}`));
-    }));
-}
-
 interface Args {
     next: NextFunction;
     key: string;
     isSelfSubmission: boolean;
+    trusted: boolean;
+    lang: string;
+    langConfig?: LangConfig;
 }
 
 export default async function readCases(folder: string, cfg: ProblemConfigFile = {}, args: Args): Promise<ParsedConfig> {
@@ -93,6 +73,8 @@ export default async function readCases(folder: string, cfg: ProblemConfigFile =
     } catch (e) {
         throw changeErrorType(e, FormatError);
     }
+    const timeRate = +(config.time_limit_rate?.[args.lang] || args.langConfig?.time_limit_rate || 1) || 1;
+    const memoryRate = +(config.memory_limit_rate?.[args.lang] || args.langConfig?.memory_limit_rate || 1) || 1;
     const checkFile = ensureFile(folder);
     const result = await readYamlCases(config, checkFile)
         .catch((e) => { throw changeErrorType(e, FormatError); });
@@ -106,8 +88,8 @@ export default async function readCases(folder: string, cfg: ProblemConfigFile =
             throw new SystemError('Cannot parse testdata.', [e.message, ...(e.params || [])]);
         }
     }
-    result.subtasks = normalizeSubtasks(result.subtasks || [], checkFile, config.time, config.memory);
+    result.subtasks = normalizeSubtasks(result.subtasks || [], checkFile, config.time, config.memory, false, timeRate, memoryRate);
     if (result.key && args.key !== result.key) throw new FormatError('Incorrect secret key');
-    if (!result.key) isValidConfig(result);
+    if (!result.key && !args.trusted) isValidConfig(result);
     return result;
 }

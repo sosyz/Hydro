@@ -1,10 +1,10 @@
 import Queue from 'p-queue';
-import { STATUS } from '@hydrooj/utils/lib/status';
-import type { JudgeResultBody } from 'hydrooj';
+import {
+    JudgeResultBody, NormalizedCase, NormalizedSubtask, STATUS,
+} from '@hydrooj/common';
 import { getConfig } from './config';
 import { FormatError } from './error';
 import { Context, ContextSubTask } from './judge/interface';
-import { NormalizedCase, NormalizedSubtask } from './utils';
 
 interface Task {
     compile: () => Promise<void>;
@@ -63,7 +63,11 @@ function judgeSubtask(subtask: NormalizedSubtask, sid: string, judgeCase: Task['
             throw e;
         }
         ctx.total_status = Math.max(ctx.total_status, ctxSubtask.status);
-        return ctxSubtask.score;
+        return {
+            type: ctxSubtask.subtask.type,
+            score: ctxSubtask.score,
+            status: ctxSubtask.status,
+        };
     };
 }
 
@@ -100,21 +104,29 @@ export const runFlow = async (ctx: Context, task: Task) => {
             ctx.end({ nop: true });
         }
     } else {
-        const tasks = [];
-        for (const sid in ctx.config.subtasks) tasks.push(judgeSubtask(ctx.config.subtasks[sid], sid, task.judgeCase)(ctx));
-        const scores = await Promise.all(tasks);
-        for (const sid in ctx.config.subtasks) {
+        const infos = {};
+        await Promise.all(Object.entries(ctx.config.subtasks).map(async ([key, value]) => {
+            const sid = value.id?.toString() || key;
+            infos[sid] = await judgeSubtask(value, sid, task.judgeCase)(ctx);
+        }));
+        for (const [key, value] of Object.entries(ctx.config.subtasks)) {
             let effective = true;
-            for (const required of ctx.config.subtasks[sid].if || []) {
+            const sid = value.id?.toString() || key;
+            for (const required of value.if || []) {
                 if (ctx.failed[required.toString()]) effective = false;
             }
-            if (effective) ctx.total_score += scores[sid];
+            if (effective) ctx.total_score += infos[sid].score;
+            else {
+                ctx.failed[sid] = true;
+                delete infos[sid];
+            }
         }
         ctx.end({
             status: ctx.total_status,
             score: ctx.total_score,
             time: Math.floor(ctx.total_time * 1000000) / 1000000,
             memory: ctx.total_memory,
+            subtasks: infos,
         });
     }
     ctx.stat.done = new Date();

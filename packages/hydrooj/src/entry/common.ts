@@ -1,13 +1,16 @@
 /* eslint-disable import/no-dynamic-require */
 /* eslint-disable no-await-in-loop */
 /* eslint-disable no-eval */
+import '../lib/index';
+
 import os from 'os';
 import path from 'path';
 import fs from 'fs-extra';
 import yaml from 'js-yaml';
-import i18n from '../lib/i18n';
+import { Context } from '../context';
 import { Logger } from '../logger';
-import * as bus from '../service/bus';
+import { PRIV } from '../model/builtin';
+import { unwrapExports } from '../utils';
 
 const logger = new Logger('common');
 
@@ -30,50 +33,67 @@ function locateFile(basePath: string, filenames: string[]) {
     return null;
 }
 
-const getLoader = (type: string, filename: string) => async function loader(pending: string[], fail: string[]) {
+type LoadTask = 'handler' | 'model' | 'addon' | 'lib' | 'script' | 'service';
+const getLoader = (type: LoadTask, filename: string, dontLoad = false) => async function loader(pending: string[], fail: string[], ctx: Context) {
     for (const i of pending) {
         const p = locateFile(i, [`${filename}.ts`, `${filename}.js`]);
         if (p && !fail.includes(i)) {
+            const name = type.replace(/^(.)/, (t) => t.toUpperCase());
             try {
-                logger.info(`${type.replace(/^(.)/, (t) => t.toUpperCase())} init: %s`, i);
-                require(p);
+                if (dontLoad) throw new Error(`deprecated ${name} in %s will not be load: ${i}`);
+                const m = unwrapExports(require(p));
+                if (m.apply) ctx.loader.reloadPlugin(ctx, p, {});
+                else logger.info(`${name} init: %s`, i);
             } catch (e) {
                 fail.push(i);
-                logger.info(`${type.replace(/^(.)/, (t) => t.toUpperCase())} load fail: %s`, i);
+                app.injectUI(
+                    'Notification', `${name} load fail: {0}`,
+                    { args: [i], type: 'warn' }, PRIV.PRIV_VIEW_SYSTEM_NOTIFICATION,
+                );
+                logger.info(`${name} load fail: %s`, i);
                 logger.error(e);
             }
         }
     }
-    await bus.serial(`app/load/${type}`);
 };
 
-export const handler = getLoader('handler', 'handler');
+export const handler = getLoader('handler', 'handler', true);
 export const addon = getLoader('addon', 'index');
 export const model = getLoader('model', 'model');
-export const lib = getLoader('lib', 'lib');
-export const script = getLoader('script', 'script');
+export const lib = getLoader('lib', 'lib', true);
+export const script = getLoader('script', 'script', true);
+export const service = getLoader('service', 'service');
+
+export async function builtinModel(ctx: Context) {
+    const modelDir = path.resolve(__dirname, '..', 'model');
+    const models = await fs.readdir(modelDir);
+    for (const t of models.filter((i) => i.endsWith('.ts'))) {
+        const q = path.resolve(modelDir, t);
+        if ('apply' in require(q)) ctx.loader.reloadPlugin(ctx, q, {}, `hydrooj/model/${t.split('.')[0]}`);
+    }
+}
 
 export async function locale(pending: string[], fail: string[]) {
-    await Promise.all(pending.map(async (i) => {
+    for (const i of pending) {
         const p = locateFile(i, ['locale', 'locales']);
         if (p && (await fs.stat(p)).isDirectory() && !fail.includes(i)) {
             try {
                 const files = await fs.readdir(p);
-                const locales = {};
                 for (const file of files) {
                     const content = await fs.readFile(path.resolve(p, file), 'utf-8');
-                    locales[file.split('.')[0]] = yaml.load(content);
+                    const dict = yaml.load(content);
+                    if (typeof dict !== 'object' || !dict) throw new Error('Invalid locale file');
+                    app.i18n.load(file.split('.')[0], dict as any);
                 }
-                i18n(locales);
                 logger.info('Locale init: %s', i);
             } catch (e) {
                 fail.push(i);
+                app.injectUI('Notification', 'Locale load fail: {0}', { args: [i], type: 'warn' }, PRIV.PRIV_VIEW_SYSTEM_NOTIFICATION);
                 logger.error('Locale Load Fail: %s', i);
                 logger.error(e);
             }
         }
-    }));
-    await bus.serial('app/load/locale');
+    }
 }
 
 export async function setting(pending: string[], fail: string[], modelSetting: typeof import('../model/setting')) {
@@ -109,12 +129,12 @@ export async function setting(pending: string[], fail: string[], modelSetting: t
                 }
                 logger.info('Config load: %s', i);
             } catch (e) {
+                app.injectUI('Notification', 'Config load fail: {0}', { args: [i], type: 'warn' }, PRIV.PRIV_VIEW_SYSTEM_NOTIFICATION);
                 logger.error('Config Load Fail: %s', i);
                 logger.error(e);
             }
         }
     }
-    await bus.serial('app/load/setting');
 }
 
 export async function template(pending: string[], fail: string[]) {
@@ -124,38 +144,18 @@ export async function template(pending: string[], fail: string[]) {
             try {
                 const files = await getFiles(p);
                 for (const file of files) {
-                    if (file.endsWith('.tsx')) global.Hydro.ui.template[file] = require(path.resolve(p, file));
-                    global.Hydro.ui.template[file] = await fs.readFile(path.resolve(p, file), 'utf-8');
+                    const l = path.resolve(p, file);
+                    if (file.endsWith('.tsx')) global.Hydro.ui.template[file] = require(l);
+                    global.Hydro.ui.template[file] = await fs.readFile(l, 'utf-8');
+                    if (process.env.DEV) global.Hydro.ui.template[`${file}.source`] = l;
                 }
                 logger.info('Template init: %s', i);
             } catch (e) {
                 fail.push(i);
+                app.injectUI('Notification', 'Template load fail: {0}', { args: [i], type: 'warn' }, PRIV.PRIV_VIEW_SYSTEM_NOTIFICATION);
                 logger.error('Template Load Fail: %s', i);
                 logger.error(e);
             }
         }
     }
-    await bus.serial('app/load/template');
-}
-
-export async function service(pending: string[], fail: string[]) {
-    for (const i of pending) {
-        const p = locateFile(i, ['service.ts', 'service.js']);
-        if (p && !fail.includes(i)) {
-            try {
-                logger.info('Service init: %s', i);
-                require(p);
-            } catch (e) {
-                fail.push(i);
-                logger.error('Service Load Fail: %s', i);
-                logger.error(e);
-            }
-        }
-    }
-    for (const key in global.Hydro.service) {
-        if (key === 'server') continue;
-        const srv = global.Hydro.service[key];
-        if (!srv.started && srv.start) await srv.start();
-    }
-    await bus.serial('app/load/service');
 }

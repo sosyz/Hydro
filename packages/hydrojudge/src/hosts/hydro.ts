@@ -1,32 +1,31 @@
 /* eslint-disable no-await-in-loop */
 import path from 'path';
-import { ObjectID } from 'bson';
-import fs from 'fs-extra';
 import PQueue from 'p-queue';
 import superagent from 'superagent';
 import WebSocket from 'ws';
-import { LangConfig } from '@hydrooj/utils/lib/lang';
+import type { LangConfig } from '@hydrooj/common';
+import { fs, pipeRequest } from '@hydrooj/utils';
 import * as sysinfo from '@hydrooj/utils/lib/sysinfo';
 import type { JudgeResultBody } from 'hydrooj';
-import { processTestdata } from '../cases';
 import { getConfig } from '../config';
 import { FormatError, SystemError } from '../error';
+import { compilerVersions, stackSize as getStackSize } from '../info';
+import { Session } from '../interface';
 import log from '../log';
 import { JudgeTask } from '../task';
-import { Lock } from '../utils';
 
 function removeNixPath(text: string) {
     return text.replace(/\/nix\/store\/[a-z0-9]{32}-/g, '/nix/');
 }
 
-export default class Hydro {
+export default class Hydro implements Session {
     ws: WebSocket;
     language: Record<string, LangConfig>;
 
     constructor(public config) {
-        this.config.detail = this.config.detail ?? true;
-        this.config.cookie = this.config.cookie || '';
-        this.config.last_update_at = this.config.last_update_at || 0;
+        this.config.detail ??= true;
+        this.config.cookie ||= '';
+        this.config.last_update_at ||= 0;
         if (!this.config.server_url.startsWith('http')) this.config.server_url = `http://${this.config.server_url}`;
         if (!this.config.server_url.endsWith('/')) this.config.server_url = `${this.config.server_url}/`;
         this.getLang = this.getLang.bind(this);
@@ -37,11 +36,12 @@ export default class Hydro {
         return superagent.get(url).set('Cookie', this.config.cookie);
     }
 
-    post(url: string, data: any) {
+    post(url: string, data?: any) {
         url = new URL(url, this.config.server_url).toString();
-        return superagent.post(url).send(data)
+        const t = superagent.post(url)
             .set('Cookie', this.config.cookie)
             .set('Accept', 'application/json');
+        return data ? t.send(data) : t;
     }
 
     async init() {
@@ -50,78 +50,47 @@ export default class Hydro {
         setInterval(() => { this.get(''); }, 30000000); // Cookie refresh only
     }
 
-    async cacheOpen(source: string, files: any[], next?) {
-        await Lock.acquire(`${this.config.host}/${source}`);
-        try {
-            return await this._cacheOpen(source, files, next);
-        } finally {
-            Lock.release(`${this.config.host}/${source}`);
+    async fetchFile<T extends string | null>(namespace: T, files: Record<string, string>): Promise<T extends null ? string : null> {
+        if (!namespace) { // record-related resource (code)
+            const name = Object.keys(files)[0].split('#')[0];
+            const res = await this.post('judge/files', { id: name });
+            const target = Object.values(files)[0] || path.join(getConfig('tmp_dir'), Math.random().toString(36).substring(2));
+            await pipeRequest(this.get(res.body.url), fs.createWriteStream(target), 60000, name);
+            return target as any;
         }
-    }
-
-    async _cacheOpen(source: string, files: any[], next?) {
-        const [domainId, pid] = source.split('/');
-        const filePath = path.join(getConfig('cache_dir'), this.config.host, source);
-        await fs.ensureDir(filePath);
-        if (!files?.length) throw new FormatError('Problem data not found.');
-        let etags: Record<string, string> = {};
-        try {
-            etags = JSON.parse(await fs.readFile(path.join(filePath, 'etags'), 'utf-8'));
-        } catch (e) { /* ignore */ }
-        const version = {};
-        const filenames = [];
-        const allFiles = new Set<string>();
-        for (const file of files) {
-            allFiles.add(file.name);
-            version[file.name] = file.etag + file.lastModified;
-            if (etags[file.name] !== file.etag + file.lastModified) filenames.push(file.name);
-        }
-        for (const name in etags) {
-            if (!allFiles.has(name) && fs.existsSync(path.join(filePath, name))) await fs.remove(path.join(filePath, name));
-        }
-        if (filenames.length) {
-            log.info(`Getting problem data: ${this.config.host}/${source}`);
-            next?.({ message: 'Syncing testdata, please wait...' });
-            await this.ensureLogin();
-            const res = await this.post(`/d/${domainId}/judge/files`, {
-                pid: +pid,
-                files: filenames,
-            });
-            // eslint-disable-next-line no-inner-declarations
-            async function download(name: string) {
-                if (name.includes('/')) await fs.ensureDir(path.join(filePath, name.split('/')[0]));
-                const w = fs.createWriteStream(path.join(filePath, name));
-                this.get(res.body.links[name]).pipe(w);
-                await new Promise((resolve, reject) => {
-                    w.on('finish', resolve);
-                    w.on('error', (e) => reject(new Error(`DownloadFail(${name}): ${e.message}`)));
-                });
-            }
-            const tasks = [];
-            const queue = new PQueue({ concurrency: 10 });
-            for (const name in res.body.links) {
-                tasks.push(queue.add(() => download.call(this, name)));
-            }
-            queue.start();
-            await Promise.all(tasks);
-            await fs.writeFile(path.join(filePath, 'etags'), JSON.stringify(version));
-            await processTestdata(filePath);
-        }
-        await fs.writeFile(path.join(filePath, 'lastUsage'), new Date().getTime().toString());
-        return filePath;
-    }
-
-    async fetchFile(name: string) {
-        name = name.split('#')[0];
-        const res = await this.post('judge/code', { id: name });
-        const target = path.join(getConfig('tmp_dir'), name.replace(/\//g, '_'));
-        const w = fs.createWriteStream(target);
-        this.get(res.body.url).pipe(w);
-        await new Promise((resolve, reject) => {
-            w.on('finish', resolve);
-            w.on('error', (e) => reject(new Error(`DownloadFail(${name}): ${e.message}`)));
+        const [domainId, pid] = namespace.split('/');
+        await this.ensureLogin();
+        const res = await this.post(`/d/${domainId}/judge/files`, {
+            pid: +pid,
+            files: Object.keys(files),
         });
-        return target;
+        if (!res.body.links) throw new FormatError('problem not exist');
+        const queue = new PQueue({ concurrency: 10 });
+        for (const name in res.body.links) {
+            queue.add(async () => {
+                if (name.includes('/')) await fs.ensureDir(path.dirname(files[name]));
+                const w = fs.createWriteStream(files[name]);
+                await pipeRequest(this.get(res.body.links[name]), w, 60000, name);
+            });
+        }
+        await queue.onEmpty();
+        return null;
+    }
+
+    async postFile(target: string, filename: string, file: string, retry = 3) {
+        try {
+            await this.post('judge/upload')
+                .field('rid', target)
+                .field('name', filename)
+                .attach('file', await fs.readFile(file));
+        } catch (e) {
+            if (!retry) {
+                log.error('PostFile Fail: %s %s %o', target, filename, e);
+                throw e;
+            }
+            await new Promise((resolve) => { setTimeout(resolve, 1000); });
+            await this.postFile(target, filename, file, retry - 1);
+        }
     }
 
     getLang(name: string, doThrow = true) {
@@ -131,25 +100,32 @@ export default class Hydro {
         return null;
     }
 
-    send(rid: string | ObjectID, key: 'next' | 'end', data: Partial<JudgeResultBody>) {
-        data.rid = new ObjectID(rid);
-        data.key = key;
-        if (data.case) data.case.message ||= '';
+    send(rid: string, key: 'next' | 'end', data: Partial<JudgeResultBody>) {
+        if (data.case && typeof data.case.message === 'string') data.case.message = removeNixPath(data.case.message);
         if (typeof data.message === 'string') data.message = removeNixPath(data.message);
         if (typeof data.compilerText === 'string') data.compilerText = removeNixPath(data.compilerText);
-        this.ws.send(JSON.stringify(data));
+        this.ws.send(JSON.stringify({ ...data, rid, key }));
     }
 
     getNext(t: JudgeTask) {
         return (data: Partial<JudgeResultBody>) => {
             log.debug('Next: %o', data);
-            this.send(t.request.rid, 'next', data);
+            const performanceMode = getConfig('performance') || t.meta.rejudge || t.meta.hackRejudge;
+            if (performanceMode && data.case && !data.compilerText && !data.message) {
+                t.callbackCache ||= [];
+                t.callbackCache.push(data.case);
+                // TODO use rate-limited send
+                // FIXME handle fields like score, time, memory, etc
+            } else {
+                this.send(t.request.rid, 'next', data);
+            }
         };
     }
 
     getEnd(t: JudgeTask) {
         return (data: Partial<JudgeResultBody>) => {
             log.info('End: %o', data);
+            if (t.callbackCache) data.cases = t.callbackCache;
             this.send(t.request.rid, 'end', data);
         };
     }
@@ -161,14 +137,33 @@ export default class Hydro {
                 Authorization: `Bearer ${this.config.cookie.split('sid=')[1].split(';')[0]}`,
             },
         });
-        global.onDestroy.push(() => this.ws.close());
-        const content = this.config.minPriority !== undefined
-            ? `{"key":"prio","prio":${this.config.minPriority}}`
+        const config: { prio?: number, concurrency?: number, lang?: string[] } = {};
+        if (this.config.minPriority !== undefined) config.prio = this.config.minPriority;
+        if (this.config.concurrency !== undefined) config.concurrency = this.config.concurrency;
+        if (this.config.lang?.length) config.lang = this.config.lang;
+        const content = Object.keys(config).length
+            ? JSON.stringify({ key: 'config', ...config })
             : '{"key":"ping"}';
-        setInterval(() => this.ws?.send?.(content), 30000);
+        let compilers = {};
+        let sendStatus = () => { };
+        let stackSize = 0;
         this.ws.on('message', (data) => {
+            if (data.toString() === 'ping') {
+                this.ws.send('pong');
+                return;
+            }
             const request = JSON.parse(data.toString());
-            if (request.language) this.language = request.language;
+            if (request.language) {
+                this.language = request.language;
+                Promise.allSettled([
+                    compilerVersions(this.language),
+                    getStackSize(),
+                ]).then(([compiler, stack]) => {
+                    compilers = compiler.status === 'fulfilled' ? compiler.value : {};
+                    stackSize = stack.status === 'fulfilled' ? stack.value : 0;
+                    sendStatus();
+                });
+            }
             if (request.task) queue.add(() => new JudgeTask(this, request.task).handle().catch((e) => log.error(e)));
         });
         this.ws.on('close', (data, reason) => {
@@ -181,18 +176,37 @@ export default class Hydro {
         });
         await new Promise((resolve) => {
             this.ws.once('open', async () => {
+                this.ws.send(content);
+                this.ws.send('{"key":"start"}');
                 if (!this.config.noStatus) {
                     const info = await sysinfo.get();
-                    this.ws.send(JSON.stringify({ key: 'status', info }));
-                    setInterval(async () => {
+                    this.ws.send(JSON.stringify({ key: 'status', info: { ...info, stackSize } }));
+                    sendStatus = () => this.ws.send(JSON.stringify({ key: 'status', info: { ...info, compilers, stackSize } }));
+                    const interval = setInterval(async () => {
                         const [mid, inf] = await sysinfo.update();
-                        this.ws.send(JSON.stringify({ key: 'status', info: { mid, ...inf } }));
+                        this.ws.send(JSON.stringify({
+                            key: 'status',
+                            info: {
+                                mid, ...inf, compilers, stackSize,
+                            },
+                        }));
                     }, 1200000);
+                    let stopped = false;
+                    const stop = () => {
+                        if (!stopped) clearInterval(interval);
+                        stopped = true;
+                    };
+                    this.ws.on('close', stop);
+                    this.ws.on('error', stop);
                 }
                 resolve(null);
             });
         });
         log.info(`[${this.config.host}] 已连接`);
+    }
+
+    dispose() {
+        this.ws?.close?.();
     }
 
     async setCookie(cookie: string) {
@@ -204,7 +218,8 @@ export default class Hydro {
         const res = await this.post('login', {
             uname: this.config.uname, password: this.config.password, rememberme: 'on',
         });
-        await this.setCookie(res.headers['set-cookie'].join(';'));
+        const setCookie = res.headers['set-cookie'];
+        await this.setCookie(Array.isArray(setCookie) ? setCookie.join(';') : setCookie);
     }
 
     async ensureLogin() {

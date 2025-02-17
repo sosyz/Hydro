@@ -26,12 +26,18 @@ const buildChecker = (...permPrivChecker: PermPrivChecker) => {
 
 export const nodes = new Proxy({}, {
     get(self, key) {
-        if (!self[key]) self[key] = [];
+        self[key] ||= [];
         return self[key];
     },
 });
 export function inject(node: UIInjectableFields, name: string, args: Record<string, any> = {}, ...permPrivChecker: PermPrivChecker) {
-    nodes[node].push({ name, args: args || {}, checker: buildChecker(...permPrivChecker) });
+    const obj = { name, args: args || {}, checker: buildChecker(...permPrivChecker) };
+    const idx = obj.args.before ? nodes[node].findIndex((i) => i.name === obj.args.before) : -1;
+    if (idx !== -1) {
+        nodes[node] = nodes[node].filter((i) => i.name !== obj.name);
+        nodes[node].splice(idx, 0, obj);
+    } else nodes[node].push(obj);
+    return () => { nodes[node] = nodes[node].filter((i) => i !== obj); };
 }
 export function getNodes(name: UIInjectableFields) {
     return nodes[name];
@@ -61,9 +67,21 @@ inject('Nav', 'ranking', { prefix: 'ranking' }, PERM.PERM_VIEW_RANKING);
 inject('Nav', 'domain_dashboard', { prefix: 'domain' }, PERM.PERM_EDIT_DOMAIN);
 inject('Nav', 'manage_dashboard', { prefix: 'manage' }, PRIV.PRIV_EDIT_SYSTEM);
 inject('ProblemAdd', 'problem_create', { icon: 'add', text: 'Create Problem' });
+inject('ControlPanel', 'manage_dashboard');
+inject('ControlPanel', 'manage_script');
+inject('ControlPanel', 'manage_user_import');
+inject('ControlPanel', 'manage_user_priv');
+inject('ControlPanel', 'manage_setting');
+inject('ControlPanel', 'manage_config');
+inject('DomainManage', 'domain_dashboard', { family: 'Properties', icon: 'info' });
+inject('DomainManage', 'domain_edit', { family: 'Properties', icon: 'info' });
+inject('DomainManage', 'domain_join_applications', { family: 'Properties', icon: 'info' });
+inject('DomainManage', 'domain_role', { family: 'Access Control', icon: 'user' });
+inject('DomainManage', 'domain_user', { family: 'Access Control', icon: 'user' });
+inject('DomainManage', 'domain_permission', { family: 'Access Control', icon: 'user' });
+inject('DomainManage', 'domain_group', { family: 'Access Control', icon: 'user' });
 
 global.Hydro.ui.inject = inject;
 global.Hydro.ui.nodes = nodes as any;
 global.Hydro.ui.getNodes = getNodes;
-global.Hydro.ui.Nav = Nav;
-global.Hydro.ui.ProblemAdd = ProblemAdd;
+Object.assign(global.Hydro.ui, { ProblemAdd, Nav });

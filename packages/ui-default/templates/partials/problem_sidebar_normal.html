@@ -26,7 +26,7 @@
     {% endif %}
     {% if page_name == 'problem_detail' %}
     {% if handler.user.hasPerm(perm.PERM_SUBMIT_PROBLEM) %}
-      <li class="menu__item scratchpad--hide"><a class="menu__link highlight" name="problem-sidebar__open-scratchpad" href="javascript:;" data-global-hotkey="alt+e">
+      <li class="menu__item scratchpad--hide nojs--hide"><a class="menu__link highlight" name="problem-sidebar__open-scratchpad" href="javascript:;" data-global-hotkey="alt+e">
         <span class="icon icon-enlarge"></span> {{ _('Open Scratchpad') }} (Alt+E)
       </a></li>
       <li class="menu__item non-scratchpad--hide"><a class="menu__link" name="problem-sidebar__quit-scratchpad" href="javascript:;" data-global-hotkey="alt+q">
@@ -55,14 +55,14 @@
       <li class="menu__item">
         <form method="post" action="{{ url('problem_detail', pid=pdoc.docId) }}">
           <input type="hidden" name="operation" value="rejudge">
-          <input type="hidden" name="csrfToken" value="{{ handler.csrfToken }}">
           <button type="submit" class="menu__link" name="problem-sidebar__rejudge">
             <span class="icon icon-refresh"></span> {{ _('Rejudge all submissions') }}
           </button>
         </form>
       </li>
     {% endif %}
-    {% if handler.user.hasPerm(perm.PERM_VIEW_DISCUSSION) or handler.user.hasPerm(perm.PERM_VIEW_PROBLEM_SOLUTION) %}
+    {% set _canViewSolution = handler.user.hasPerm(perm.PERM_VIEW_PROBLEM_SOLUTION) or (handler.user.hasPerm(perm.PERM_VIEW_PROBLEM_SOLUTION_ACCEPT) and psdoc.status == STATUS.STATUS_ACCEPTED) %}
+    {% if handler.user.hasPerm(perm.PERM_VIEW_DISCUSSION) or _canViewSolution %}
       <li class="menu__seperator"></li>
     {% endif %}
     {% if handler.user.hasPerm(perm.PERM_VIEW_DISCUSSION) %}
@@ -70,13 +70,16 @@
         <span class="icon icon-comment--text"></span> {{ _('Discussions') }}{% if discussionCount !== undefined %} ({{ discussionCount }}){% endif %}
       </a></li>
     {% endif %}
-    {% if handler.user.hasPerm(perm.PERM_VIEW_PROBLEM_SOLUTION) %}
+    {% if _canViewSolution %}
       <li class="menu__item"><a class="menu__link{% if page_name == 'problem_solution' %} active{% endif %}" href="{{ url('problem_solution', pid=pdoc.pid|default(pdoc.docId)) }}">
         <span class="icon icon-comment--text"></span> {{ _('Solutions') }}{% if solutionCount !== undefined %} ({{ solutionCount }}){% endif %}
       </a></li>
     {% endif %}
       <li class="menu__item"><a class="menu__link{% if page_name == 'problem_files' %} active{% endif %}" href="{{ url('problem_files', pid=pdoc.pid|default(pdoc.docId)) }}">
         <span class="icon icon-file"></span> {{ _('Files') }}
+      </a></li>
+      <li class="menu__item"><a class="menu__link{% if page_name == 'problem_statistics' %} active{% endif %}" href="{{ url('problem_statistics', pid=pdoc.pid|default(pdoc.docId)) }}">
+        <span class="icon icon-statistics"></span> {{ _('Statistics') }}
       </a></li>
     {% if handler.user.own(pdoc, perm.PERM_EDIT_PROBLEM_SELF) or handler.user.hasPerm(perm.PERM_EDIT_PROBLEM) %}
       <li class="menu__seperator"></li>
@@ -111,14 +114,6 @@
     <h1 class="section__title">{{ _('Information') }}</h1>
   </div>
   {% include "partials/problem-sidebar-information.html" %}
-</div>
-{% elif page_name != 'contest_detail_problem' and page_name != 'problem_config' %}
-<div class="section side nojs--hide">
-  <div class="section__header">
-    <h1 class="section__title">{{ _('Statistics') }}</h1>
-  </div>
-  <div id="submission-status-placeholder" style="width: 100%; height:230px"></div>
-  <div id="submission-score-placeholder" style="width: 100%; height:230px"></div>
 </div>
 {% endif %}
 {% if page_name == 'problem_detail' and (tdocs.length or ctdocs.length or htdocs.length) %}

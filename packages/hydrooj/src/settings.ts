@@ -1,9 +1,8 @@
 import yaml from 'js-yaml';
 import { nanoid } from 'nanoid';
 import Schema from 'schemastery';
-import * as bus from 'hydrooj/src/service/bus';
 import { Logger } from './logger';
-import { NestKeys } from './typeutils';
+import { Flatten } from './typeutils';
 
 const defaultPath = process.env.CI ? '/tmp/file'
     : process.env.DEFAULT_STORE_PATH || '/data/file/hydro';
@@ -64,7 +63,7 @@ export async function saveConfig(config: any) {
     Schema.intersect(SystemSettings)(config);
     const value = yaml.dump(config);
     await global.Hydro.service.db.collection('system').updateOne({ _id: 'config' }, { $set: { value } }, { upsert: true });
-    bus.broadcast('config/update');
+    loadConfig();
 }
 export async function setConfig(key: string, value: any) {
     const path = key.split('.');
@@ -72,7 +71,7 @@ export async function setConfig(key: string, value: any) {
     const t = path.pop();
     let cursor = systemConfig;
     for (const p of path) {
-        if (!cursor[p]) cursor[p] = {};
+        cursor[p] ||= {};
         cursor = cursor[p];
     }
     cursor[t] = value;
@@ -81,7 +80,7 @@ export async function setConfig(key: string, value: any) {
 
 export function requestConfig<T, S>(s: Schema<T, S>): {
     config: ReturnType<Schema<T, S>>,
-    setConfig: (key: NestKeys<ReturnType<Schema<T, S>>>, value: any) => Promise<void>,
+    setConfig: (key: keyof Flatten<ReturnType<Schema<T, S>>> & string, value: any) => Promise<void>,
 } {
     SystemSettings.push(s);
     let curValue = s(systemConfig);
@@ -109,5 +108,3 @@ export function requestConfig<T, S>(s: Schema<T, S>): {
 const builtin = requestConfig(builtinSettings);
 export const builtinConfig = builtin.config;
 export const setBuiltinConfig = builtin.setConfig;
-
-bus.on('config/update', loadConfig);

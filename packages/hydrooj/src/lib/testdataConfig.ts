@@ -1,7 +1,8 @@
 import { load } from 'js-yaml';
-import readYamlCases from '@hydrooj/utils/lib/cases';
-import type { ProblemConfig, ProblemConfigFile } from '../interface';
-import { normalizeSubtasks, parseMemoryMB, parseTimeMS } from '../utils';
+import { normalizeSubtasks, ProblemConfigFile } from '@hydrooj/common';
+import { readYamlCases } from '@hydrooj/common/cases';
+import { parseMemoryMB, parseTimeMS } from '@hydrooj/utils';
+import type { ProblemConfig } from '../interface';
 
 export async function parseConfig(config: string | ProblemConfigFile = {}) {
     const cfg: ProblemConfigFile = typeof config === 'string'
@@ -33,10 +34,7 @@ export async function parseConfig(config: string | ProblemConfigFile = {}) {
     if (result.timeMax < result.timeMin) result.timeMax = result.timeMin = 1000;
     if (cfg.langs) result.langs = cfg.langs;
     if (cfg.redirect) result.redirect = cfg.redirect.split('/', 2) as any;
-    if (cfg.filename && result.type === 'default') {
-        result.type = 'fileio';
-        result.subType = cfg.filename;
-    }
+    if (cfg.filename && result.type === 'default') result.subType = cfg.filename;
     return result;
 }
 

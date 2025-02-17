@@ -1,4 +1,3 @@
-import { size } from '@hydrooj/utils/lib/common';
 import $ from 'jquery';
 import _ from 'lodash';
 import { ConfirmDialog } from 'vj/components/dialog';
@@ -8,10 +7,9 @@ import Notification from 'vj/components/notification';
 import uploadFiles from 'vj/components/upload';
 import download from 'vj/components/zipDownloader';
 import { NamedPage } from 'vj/misc/Page';
-import i18n from 'vj/utils/i18n';
-import request from 'vj/utils/request';
-import { slideDown, slideUp } from 'vj/utils/slide';
-import tpl from 'vj/utils/tpl';
+import {
+  i18n, pjax, request, slideDown, slideUp, tpl,
+} from 'vj/utils';
 
 const categories = {};
 const dirtyCategories = [];
@@ -24,7 +22,7 @@ function setDomSelected($dom, selected) {
 }
 
 async function updateSelection() {
-  dirtyCategories.forEach(({ type, category, subcategory }) => {
+  for (const { type, category, subcategory } of dirtyCategories) {
     let item = categories[category];
     const isSelected = item.select || _.some(item.children, (c) => c.select);
     setDomSelected(item.$tag, isSelected);
@@ -37,7 +35,7 @@ async function updateSelection() {
       if (item.select) selections.push(selectionName);
       else _.pull(selections, selectionName);
     }
-  });
+  }
   const requestCategoryTags = _.uniq(selections
     .filter((s) => s.indexOf(',') !== -1)
     .map((s) => s.split(',')[0]));
@@ -61,7 +59,7 @@ function findCategory(name) {
 function parseCategorySelection() {
   const $txt = $('[name="tag"]');
   tags.length = 0;
-  $txt.val().split(',').map((name) => name.trim()).forEach((name) => {
+  for (const name of $txt.val().split(',').map((i) => i.trim())) {
     if (!name) return;
     const [category, subcategory] = findCategory(name);
     if (!category) tags.push(name);
@@ -72,7 +70,7 @@ function parseCategorySelection() {
       categories[category].children[subcategory].select = true;
       dirtyCategories.push({ type: 'subcategory', subcategory, category });
     }
-  });
+  }
   updateSelection();
 }
 
@@ -80,13 +78,13 @@ function buildCategoryFilter() {
   const $container = $('[data-widget-cf-container]');
   if (!$container) return;
   $container.attr('class', 'widget--category-filter row small-up-3 medium-up-2');
-  $container.children('li').get().forEach((category) => {
+  for (const category of $container.children('li').get()) {
     const $category = $(category)
       .attr('class', 'widget--category-filter__category column');
     const $categoryTag = $category
       .find('.section__title a')
       .remove()
-      .attr('class', 'widget--category-filter__category-tag');
+      .attr('class', 'widget--category-filter__tag');
     const categoryText = $categoryTag.text();
     const $drop = $category
       .children('.chip-list')
@@ -104,45 +102,38 @@ function buildCategoryFilter() {
         .children('li')
         .attr('class', 'widget--category-filter__subcategory')
         .find('a')
-        .attr('class', 'widget--category-filter__subcategory-tag')
+        .attr('class', 'widget--category-filter__tag')
         .attr('data-category', categoryText);
-      $subCategoryTags.get().forEach((subCategoryTag) => {
+      for (const subCategoryTag of $subCategoryTags.get()) {
         const $tag = $(subCategoryTag);
         treeItem.children[$tag.text()] = { select: false, $tag };
-      });
+      }
       Dropdown.getOrConstruct($categoryTag, {
         target: $drop[0],
         position: 'left center',
       });
     }
-  });
-  $(document).on('click', '.widget--category-filter__category-tag', (ev) => {
+  }
+  $(document).on('click', '.widget--category-filter__tag', (ev) => {
     if (ev.shiftKey || ev.metaKey || ev.ctrlKey) return;
-    const category = $(ev.currentTarget).text();
-    const treeItem = categories[category];
+    const tag = $(ev.currentTarget).text();
+    const category = $(ev.currentTarget).attr('data-category');
+    const treeItem = category ? categories[category].children[tag] : categories[tag];
     // the effect should be cancelSelect if it is shown as selected when clicking
     const shouldSelect = treeItem.$tag.hasClass('selected') ? false : !treeItem.select;
     treeItem.select = shouldSelect;
-    dirtyCategories.push({ type: 'category', category });
-    if (!shouldSelect) {
+    dirtyCategories.push(category
+      ? { type: 'subcategory', subcategory: tag, category }
+      : { type: 'category', category: tag });
+    if (!category && !shouldSelect) {
       // de-select children
       _.forEach(treeItem.children, (treeSubItem, subcategory) => {
         if (treeSubItem.select) {
           treeSubItem.select = false;
-          dirtyCategories.push({ type: 'subcategory', subcategory, category });
+          dirtyCategories.push({ type: 'subcategory', subcategory, category: tag });
         }
       });
     }
-    updateSelection();
-    ev.preventDefault();
-  });
-  $(document).on('click', '.widget--category-filter__subcategory-tag', (ev) => {
-    if (ev.shiftKey || ev.metaKey || ev.ctrlKey) return;
-    const subcategory = $(ev.currentTarget).text();
-    const category = $(ev.currentTarget).attr('data-category');
-    const treeItem = categories[category].children[subcategory];
-    treeItem.select = !treeItem.select;
-    dirtyCategories.push({ type: 'subcategory', subcategory, category });
     updateSelection();
     ev.preventDefault();
   });
@@ -163,7 +154,7 @@ async function handleSection(ev, sidebar, type) {
   $section.removeClass('animating');
 }
 
-export default new NamedPage(['problem_create', 'problem_edit'], (pagename) => {
+export default new NamedPage(['problem_create', 'problem_edit'], () => {
   let confirmed = false;
   $(document).on('click', '[name="operation"]', (ev) => {
     ev.preventDefault();
@@ -198,16 +189,28 @@ export default new NamedPage(['problem_create', 'problem_edit'], (pagename) => {
     await new Promise((resolve) => { input.onchange = resolve; });
     await uploadFiles('./files', input.files, {
       type: 'additional_file',
-      singleFileUploadCallback: (file) => {
-        $('.additionalfile-table tbody').append(
-          $(tpl`<tr data-filename="${file.name}" data-size="${file.size.toString()}">
-            <td class="col--name" title="${file.name}"><a href="./file/${file.name}?type=testdata">${file.name}</a></td>
-            <td class="col--size">${size(file.size)}</td>
-            <td class="col--operation"><a href="javascript:;" name="testdata__delete"><span class="icon icon-delete"></span></a></td>
-          </tr>`),
-        );
-      },
+      sidebar: true,
+      pjax: true,
     });
+  }
+
+  async function handleClickRename(ev) {
+    const file = [$(ev.currentTarget).parent().parent().attr('data-filename')];
+    // eslint-disable-next-line no-alert
+    const newName = prompt(i18n('Enter a new name for the file: '));
+    if (!newName) return;
+    try {
+      await request.post('./files', {
+        operation: 'rename_files',
+        files: file,
+        newNames: [newName],
+        type: 'additional_file',
+      });
+      Notification.success(i18n('File have been renamed.'));
+      await pjax.request({ url: './files?d=additional_file&sidebar=true', push: false });
+    } catch (error) {
+      Notification.error(error.message);
+    }
   }
 
   async function handleClickRemove(ev) {
@@ -223,27 +226,19 @@ export default new NamedPage(['problem_create', 'problem_edit'], (pagename) => {
         type: 'additional_file',
       });
       Notification.success(i18n('File have been deleted.'));
-      $(ev.currentTarget).parent().parent().remove();
+      await pjax.request({ url: './files?d=additional_file&sidebar=true', push: false });
     } catch (error) {
       Notification.error(error.message);
     }
   }
 
   async function handleClickDownloadAll() {
-    const files = $('.additionalfile-table tr').map(function () { return $(this).attr('data-filename'); }).get();
+    const files = $('.additional_file-table tr').map(function () { return $(this).attr('data-filename'); }).get();
     const { links, pdoc } = await request.post('./files', { operation: 'get_links', files, type: 'additional_file' });
     const targets = [];
     for (const filename of Object.keys(links)) targets.push({ filename, url: links[filename] });
     await download(`${pdoc.docId} ${pdoc.title}.zip`, targets);
   }
-
-  setInterval(() => {
-    $('img').each(function () {
-      if (this.src.startsWith('file://')) {
-        $(this).attr('src', $(this).attr('src').replace('file://', (pagename === 'problem_create' ? `/file/${UserContext._id}/` : './file/')));
-      }
-    });
-  }, 500);
 
   const $main = $('textarea[data-editor]');
   const $field = $('textarea[data-markdown-upload]');
@@ -300,6 +295,7 @@ export default new NamedPage(['problem_create', 'problem_edit'], (pagename) => {
     }
   });
   $(document).on('click', '[name="additional_file__upload"]', () => handleClickUpload());
+  $(document).on('click', '[name="additional_file__rename"]', (ev) => handleClickRename(ev));
   $(document).on('click', '[name="additional_file__delete"]', (ev) => handleClickRemove(ev));
   $(document).on('click', '[name="additional_file__download"]', () => handleClickDownloadAll());
   $(document).on('click', '[name="additional_file__section__expand"]', (ev) => handleSection(ev, 'additional_file', 'expand'));

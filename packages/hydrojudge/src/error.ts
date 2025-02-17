@@ -1,4 +1,4 @@
-import { STATUS_TEXTS } from '@hydrooj/utils/lib/status';
+import { STATUS_TEXTS } from '@hydrooj/common';
 
 interface CompileErrorInfo {
     stdout?: string,
@@ -29,14 +29,6 @@ export class FormatError extends Error {
     type = 'FormatError';
 
     constructor(message: string, public params = []) {
-        super(message);
-    }
-}
-
-export class RuntimeError extends Error {
-    type = 'RuntimeError';
-
-    constructor(public detail: string, message: string) {
         super(message);
     }
 }

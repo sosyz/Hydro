@@ -2,6 +2,7 @@ import { diffLines } from 'diff';
 import type { ProblemConfigFile, TestCaseConfig } from 'hydrooj/src/interface';
 import $ from 'jquery';
 import yaml from 'js-yaml';
+import { isEqual } from 'lodash';
 import type { editor } from 'monaco-editor';
 import React from 'react';
 import { connect } from 'react-redux';
@@ -21,15 +22,16 @@ const mapDispatchToProps = (dispatch) => ({
 });
 
 interface Props {
-  config: object;
+  config: any;
   handleUpdateCode: Function;
 }
 
 const configKey = [
   'type', 'subType', 'target', 'score', 'time',
   'memory', 'filename', 'checker_type', 'checker', 'interactor',
-  'validator', 'user_extra_files', 'judge_extra_files', 'detail', 'outputs',
-  'redirect', 'cases', 'subtasks', 'langs',
+  'manager', 'num_processes', 'validator', 'user_extra_files', 'judge_extra_files',
+  'detail', 'outputs', 'redirect', 'cases', 'subtasks',
+  'langs', 'key', 'time_limit_rate', 'memory_limit_rate',
 ];
 
 const subtasksKey = [
@@ -85,8 +87,8 @@ export function configYamlFormat(config: ProblemConfigFile) {
 export default connect(mapStateToProps, mapDispatchToProps)(class MonacoEditor extends React.PureComponent<Props> {
   disposable = [];
   containerElement: HTMLElement;
-  private __preventUpdate = false;
-  private __preventFormat = false;
+  __preventUpdate = false;
+  __preventFormat = false;
 
   editor: editor.IStandaloneCodeEditor;
   model: editor.ITextModel;
@@ -95,10 +97,11 @@ export default connect(mapStateToProps, mapDispatchToProps)(class MonacoEditor e
   async componentDidMount() {
     const { monaco } = await load(['yaml']);
     const uri = monaco.Uri.parse('hydro://problem/file/config.yaml');
-    this.model = monaco.editor.createModel(yaml.dump(configYamlFormat(this.props.config)), 'yaml', uri);
+    this.model = monaco.editor.createModel(yaml.dump(configYamlFormat(this.props.config), { noArrayIndent: true }), 'yaml', uri);
     this.vjEditor = Editor.getOrConstruct($(this.containerElement), {
       language: 'yaml',
       model: this.model,
+      lineNumbers: 'off',
       onChange: (value: string) => {
         this.__preventUpdate = true;
         if (!this.__preventFormat) this.props.handleUpdateCode(value);
@@ -109,34 +112,38 @@ export default connect(mapStateToProps, mapDispatchToProps)(class MonacoEditor e
   }
 
   componentDidUpdate(prevProps) {
-    if (this.__preventUpdate || !this.model) return;
-    if (yaml.dump(prevProps.config) !== yaml.dump(this.props.config)) {
-      this.__preventFormat = true;
-      const curValue = this.model.getValue();
-      const diff = diffLines(curValue, yaml.dump(configYamlFormat(this.props.config)));
-      const ops = [];
-      let cursor = 1;
-      for (const line of diff) {
-        if (line.added) {
-          let range = this.model.getFullModelRange();
-          range = range.setStartPosition(cursor, 0);
-          range = range.setEndPosition(cursor, 0);
-          ops.push({ range, text: line.value });
-        } else if (line.removed) {
-          let range = this.model.getFullModelRange();
-          range = range.setStartPosition(cursor, 0);
-          cursor += line.count;
-          range = range.setEndPosition(cursor, 0);
-          ops.push({ range, text: '' });
-        } else cursor += line.count;
-      }
-      this.model.pushEditOperations([], ops, undefined);
-      this.__preventFormat = false;
+    if (this.__preventUpdate || !this.model || !this.props.config.__valid) return;
+    if (yaml.dump(prevProps.config, { noArrayIndent: true }) === yaml.dump(this.props.config, { noArrayIndent: true })) return;
+    const curValue = this.model.getValue();
+    const pending = configYamlFormat(this.props.config);
+    try {
+      const curConfig = yaml.load(curValue);
+      if (isEqual(curConfig, pending)) return;
+    } catch { }
+    this.__preventFormat = true;
+    const diff = diffLines(curValue, yaml.dump(pending, { noArrayIndent: true }));
+    const ops = [];
+    let cursor = 1;
+    for (const line of diff) {
+      if (line.added) {
+        let range = this.model.getFullModelRange();
+        range = range.setStartPosition(cursor, 0);
+        range = range.setEndPosition(cursor, 0);
+        ops.push({ range, text: line.value });
+      } else if (line.removed) {
+        let range = this.model.getFullModelRange();
+        range = range.setStartPosition(cursor, 0);
+        cursor += line.count;
+        range = range.setEndPosition(cursor, 0);
+        ops.push({ range, text: '' });
+      } else cursor += line.count;
     }
+    this.model.pushEditOperations([], ops, undefined);
+    this.__preventFormat = false;
   }
 
   componentWillUnmount() {
-    if (this.vjEditor) this.vjEditor.destory();
+    if (this.vjEditor) this.vjEditor.destroy();
     if (this.model) this.model.dispose();
     if (this.editor) this.editor.dispose();
     this.disposable.map((i) => i.dispose());
@@ -156,8 +163,7 @@ export default connect(mapStateToProps, mapDispatchToProps)(class MonacoEditor e
           width: '100%',
         }}
         className="ConfigMonacoEditor"
-      >
-      </div>
+      />
     );
   }
 });

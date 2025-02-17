@@ -1,29 +1,27 @@
 {
     "name": "@hydrooj/hydrojudge",
     "bin": "bin/hydrojudge.js",
-    "version": "3.0.3",
-    "main": "package.json",
+    "version": "3.4.4",
+    "main": "./src/index.ts",
     "author": "undefined <i@undefined.moe>",
     "repository": "https://github.com/hydro-dev/Hydro.git",
     "dependencies": {
-        "@hydrooj/utils": "workspace:*",
+        "@hydrooj/common": "workspace:^",
+        "@hydrooj/utils": "workspace:^",
+        "adm-zip": "0.5.14",
         "cac": "^6.7.14",
-        "fs-extra": "^10.1.0",
-        "js-yaml": "^4.1.0",
-        "lodash": "^4.17.21",
-        "p-queue": "^7.3.0",
-        "schemastery": "^3.5.3",
-        "shell-quote": "^1.7.3",
-        "superagent": "^8.0.0",
-        "ws": "^8.8.1"
+        "p-queue": "^8.1.0",
+        "schemastery": "^3.16.0",
+        "semver": "^7.7.1",
+        "shell-quote": "^1.8.2",
+        "superagent": "^10.1.1",
+        "ws": "^8.18.0"
     },
     "preferUnplugged": true,
     "license": "AGPL-3.0-or-later",
     "devDependencies": {
-        "@types/fs-extra": "^9.0.13",
-        "@types/js-yaml": "^4.0.5",
-        "@types/lodash": "^4.14.184",
-        "@types/shell-quote": "^1.7.1",
-        "@types/ws": "^8.5.3"
+        "@types/adm-zip": "^0.4.34",
+        "@types/shell-quote": "^1.7.5",
+        "@types/ws": "^8.5.14"
     }
 }

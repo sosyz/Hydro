@@ -1,7 +1,6 @@
 import $ from 'jquery';
-import _ from 'lodash';
 import DOMAttachedObject from 'vj/components/DOMAttachedObject';
-import delay from 'vj/utils/delay';
+import { delay } from 'vj/utils';
 
 const ANIMATION_DURATION = 4000;
 
@@ -74,5 +73,3 @@ export default class Rotator extends DOMAttachedObject {
     return this.value;
   }
 }
-
-_.assign(Rotator, DOMAttachedObject);

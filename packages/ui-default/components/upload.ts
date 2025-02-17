@@ -1,9 +1,8 @@
 import { Dialog } from 'vj/components/dialog/index';
 import Notification from 'vj/components/notification';
-import delay from 'vj/utils/delay';
-import i18n from 'vj/utils/i18n';
-import pjax from 'vj/utils/pjax';
-import request from 'vj/utils/request';
+import {
+  delay, i18n, pjax, request,
+} from 'vj/utils';
 
 function onBeforeUnload(e) {
   e.returnValue = '';
@@ -12,18 +11,20 @@ function onBeforeUnload(e) {
 interface UploadOptions {
   type?: string;
   pjax?: boolean;
+  sidebar?: boolean;
   singleFileUploadCallback?: (file: File) => any;
+  filenameCallback?: (file: File) => string;
 }
 export default async function uploadFiles(endpoint = '', files: File[] | FileList = [], options: UploadOptions = {}) {
   const dialog = new Dialog({
     $body: `
       <div class="file-label" style="text-align: center; margin-bottom: 5px; color: gray; font-size: small;"></div>
-      <div class="bp4-progress-bar bp4-intent-primary bp4-no-stripes">
-        <div class="file-progress bp4-progress-meter" style="width: 0"></div>
+      <div class="bp5-progress-bar bp5-intent-primary bp5-no-stripes">
+        <div class="file-progress bp5-progress-meter" style="width: 0"></div>
       </div>
       <div class="upload-label" style="text-align: center; margin: 5px 0; color: gray; font-size: small;"></div>
-      <div class="bp4-progress-bar bp4-intent-primary bp4-no-stripes">
-        <div class="upload-progress bp4-progress-meter" style="width: 0"></div>
+      <div class="bp5-progress-bar bp5-intent-primary bp5-no-stripes">
+        <div class="upload-progress bp5-progress-meter" style="width: 0"></div>
       </div>`,
   });
   try {
@@ -38,7 +39,7 @@ export default async function uploadFiles(endpoint = '', files: File[] | FileLis
       if (Number.isNaN(+i)) continue;
       const file = files[i];
       const data = new FormData();
-      data.append('filename', file.name);
+      data.append('filename', options.filenameCallback?.(file) || file.name);
       data.append('file', file);
       if (options.type) data.append('type', options.type);
       data.append('operation', 'upload_file');
@@ -66,7 +67,12 @@ export default async function uploadFiles(endpoint = '', files: File[] | FileLis
     }
     window.removeEventListener('beforeunload', onBeforeUnload);
     Notification.success(i18n('File uploaded successfully.'));
-    if (options.pjax) await pjax.request({ push: false });
+    if (options.pjax) {
+      let params = '';
+      if (options.type) params += `?d=${options.type}`;
+      if (options.sidebar) params += `${params ? '&' : '?'}sidebar=true`;
+      await pjax.request({ push: false, url: `${endpoint}${params || ''}` });
+    }
   } catch (e) {
     console.error(e);
     Notification.error(i18n('File upload failed: {0}', e.toString()));

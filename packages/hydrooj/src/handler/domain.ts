@@ -1,13 +1,13 @@
 import { load } from 'js-yaml';
 import { Dictionary } from 'lodash';
 import moment from 'moment-timezone';
+import type { Context } from '../context';
 import {
-    DomainJoinAlreadyMemberError, DomainJoinForbiddenError, ForbiddenError,
-    InvalidJoinInvitationCodeError, PermissionError, RoleAlreadyExistError, ValidationError,
+    CannotDeleteSystemDomainError, DomainJoinAlreadyMemberError, DomainJoinForbiddenError, ForbiddenError,
+    InvalidJoinInvitationCodeError, OnlyOwnerCanDeleteDomainError, PermissionError, RoleAlreadyExistError, ValidationError,
 } from '../error';
 import type { DomainDoc } from '../interface';
 import avatar from '../lib/avatar';
-import paginate from '../lib/paginate';
 import { PERM, PERMS_BY_FAMILY, PRIV } from '../model/builtin';
 import * as discussion from '../model/discussion';
 import domain from '../model/domain';
@@ -16,57 +16,20 @@ import { DOMAIN_SETTINGS, DOMAIN_SETTINGS_BY_KEY } from '../model/setting';
 import * as system from '../model/system';
 import user from '../model/user';
 import {
-    Handler, param, post, query, Route, Types,
+    Handler, param, post, query, requireSudo, Types,
 } from '../service/server';
 import { log2 } from '../utils';
-import { registerResolver, registerValue } from './api';
-
-registerValue('GroupInfo', [
-    ['name', 'String!'],
-    ['uids', '[Int]!'],
-]);
-
-registerResolver('Query', 'domain(id: String)', 'Domain', async (args, ctx) => {
-    const ddoc = args.id ? await domain.get(args.id) : ctx.domain;
-    if (!ddoc) return null;
-    const udoc = await user.getById(ddoc._id, ctx.user._id);
-    if (!udoc.hasPerm(PERM.PERM_VIEW) && !udoc.hasPriv(PRIV.PRIV_VIEW_ALL_DOMAIN)) return null;
-    ctx.udoc = udoc;
-    return ddoc;
-});
-
-registerResolver('Domain', 'manage', 'DomainManage', async (args, ctx) => {
-    if (!ctx.udoc.hasPerm(PERM.PERM_EDIT_DOMAIN)) throw new PermissionError(PERM.PERM_EDIT_DOMAIN);
-    return ctx.parent;
-});
-
-registerResolver('DomainManage', 'group', 'DomainGroup', (args, ctx) => ctx.parent);
-registerResolver(
-    'DomainGroup', 'list(uid: Int)', '[GroupInfo]',
-    (args, ctx) => user.listGroup(ctx.parent._id, args.uid),
-);
-registerResolver(
-    'DomainGroup', 'update(name: String!, uids: [Int]!)', 'Boolean',
-    async (args, ctx) => !!(await user.updateGroup(ctx.parent._id, args.name, args.uids)).upsertedCount,
-);
-registerResolver(
-    'DomainGroup', 'del(name: String!)', 'Boolean',
-    async (args, ctx) => !!(await user.delGroup(ctx.parent._id, args.name)).deletedCount,
-);
 
 class DomainRankHandler extends Handler {
     @query('page', Types.PositiveInt, true)
     async get(domainId: string, page = 1) {
-        const [dudocs, upcount, ucount] = await paginate(
+        const [dudocs, upcount, ucount] = await this.paginate(
             domain.getMultiUserInDomain(domainId, { uid: { $gt: 1 }, rp: { $gt: 0 } }).sort({ rp: -1 }),
             page,
-            100,
+            'ranking',
         );
-        let udocs = [];
-        for (const dudoc of dudocs) {
-            udocs.push(user.getById(domainId, dudoc.uid));
-        }
-        udocs = await Promise.all(udocs);
+        const udict = await user.getList(domainId, dudocs.map((dudoc) => dudoc.uid));
+        const udocs = dudocs.map((i) => udict[i.uid]);
         this.response.template = 'ranking.html';
         this.response.body = {
             udocs, upcount, ucount, page,
@@ -75,8 +38,6 @@ class DomainRankHandler extends Handler {
 }
 
 class ManageHandler extends Handler {
-    domain: DomainDoc;
-
     async prepare({ domainId }) {
         this.checkPerm(PERM.PERM_EDIT_DOMAIN);
         this.domain = await domain.get(domainId);
@@ -92,26 +53,22 @@ class DomainEditHandler extends ManageHandler {
     async post(args) {
         if (args.operation) return;
         const $set = {};
+        const booleanKeys = args.booleanKeys || {};
+        delete args.booleanKeys;
+        for (const key in booleanKeys) if (!args[key]) $set[key] = false;
         for (const key in args) {
             if (DOMAIN_SETTINGS_BY_KEY[key]) $set[key] = args[key];
         }
         await domain.edit(args.domainId, $set);
         this.response.redirect = this.url('domain_dashboard');
     }
-
-    async postDelete({ domainId, password }) {
-        this.user.checkPassword(password);
-        if (domainId === 'system') throw new ForbiddenError('You are not allowed to delete system domain');
-        if (this.domain.owner !== this.user._id) throw new ForbiddenError('You are not the owner of this domain.');
-        await domain.del(domainId);
-        this.response.redirect = this.url('home_domain', { domainId: 'system' });
-    }
 }
 
 class DomainDashboardHandler extends ManageHandler {
     async get() {
+        const owner = await user.getById(this.domain._id, this.domain.owner);
         this.response.template = 'domain_dashboard.html';
-        this.response.body = { domain: this.domain };
+        this.response.body = { domain: this.domain, owner };
     }
 
     async postInitDiscussionNode({ domainId }) {
@@ -127,10 +84,23 @@ class DomainDashboardHandler extends ManageHandler {
         }
         this.back();
     }
+
+    @requireSudo
+    async postDelete({ domainId }) {
+        if (domainId === 'system') throw new CannotDeleteSystemDomainError();
+        if (this.domain.owner !== this.user._id) throw new OnlyOwnerCanDeleteDomainError();
+        await Promise.all([
+            domain.del(domainId),
+            oplog.log(this, 'domain.delete', {}),
+        ]);
+        this.response.redirect = this.url('home_domain', { domainId: 'system' });
+    }
 }
 
 class DomainUserHandler extends ManageHandler {
-    async get({ domainId }) {
+    @requireSudo
+    @param('format', Types.Range(['default', 'raw']), true)
+    async get({ domainId }, format = 'default') {
         const rudocs = {};
         const [dudocs, roles] = await Promise.all([
             domain.getMultiUserInDomain(domainId, {
@@ -141,23 +111,23 @@ class DomainUserHandler extends ManageHandler {
             }).toArray(),
             domain.getRoles(domainId),
         ]);
-        const uids = dudocs.map((dudoc) => dudoc.uid);
-        const udict = await user.getList(domainId, uids);
-        for (const role of roles) rudocs[role._id] = [];
-        for (const dudoc of dudocs) {
-            const ud = udict[dudoc.uid];
-            rudocs[ud.role || 'default'].push(ud);
+        // TODO: switch to getListForRender for better performance
+        const udict = await user.getList(domainId, dudocs.map((dudoc) => dudoc.uid));
+        const users = dudocs.filter((dudoc) => udict[dudoc.uid].priv & PRIV.PRIV_USER_PROFILE);
+        for (const role of roles) {
+            rudocs[role._id] = users.filter((dudoc) => dudoc.role === role._id).map((i) => udict[i.uid]);
         }
-        const rolesSelect = roles.map((role) => [role._id, role._id]);
-        this.response.template = 'domain_user.html';
+        this.response.template = format === 'raw' ? 'domain_user_raw.html' : 'domain_user.html';
         this.response.body = {
-            roles, rolesSelect, rudocs, udict, domain: this.domain,
+            roles, rudocs, udict, domain: this.domain,
         };
     }
 
+    @requireSudo
     @post('uid', Types.Int)
-    @post('role', Types.Name)
+    @post('role', Types.Role)
     async postSetUser(domainId: string, uid: number, role: string) {
+        if (uid === this.domain.owner) throw new ForbiddenError();
         await Promise.all([
             domain.setUserRole(domainId, uid, role),
             oplog.log(this, 'domain.setRole', { uid, role }),
@@ -165,9 +135,11 @@ class DomainUserHandler extends ManageHandler {
         this.back();
     }
 
+    @requireSudo
     @param('uid', Types.NumericArray)
-    @param('role', Types.Name)
+    @param('role', Types.Role)
     async postSetUsers(domainId: string, uid: number[], role: string) {
+        if (uid.includes(this.domain.owner)) throw new ForbiddenError();
         await Promise.all([
             domain.setUserRole(domainId, uid, role),
             oplog.log(this, 'domain.setRole', { uid, role }),
@@ -177,6 +149,7 @@ class DomainUserHandler extends ManageHandler {
 }
 
 class DomainPermissionHandler extends ManageHandler {
+    @requireSudo
     async get({ domainId }) {
         const roles = await domain.getRoles(domainId);
         this.response.template = 'domain_permission.html';
@@ -185,9 +158,9 @@ class DomainPermissionHandler extends ManageHandler {
         };
     }
 
+    @requireSudo
     async post({ domainId }) {
         const roles = {};
-        delete this.request.body.csrfToken;
         for (const role in this.request.body) {
             const perms = this.request.body[role] instanceof Array
                 ? this.request.body[role]
@@ -195,34 +168,45 @@ class DomainPermissionHandler extends ManageHandler {
             roles[role] = 0n;
             for (const r of perms) roles[role] |= 1n << BigInt(r);
         }
-        await domain.setRoles(domainId, roles);
+        await Promise.all([
+            domain.setRoles(domainId, roles),
+            oplog.log(this, 'domain.setRoles', { roles }),
+        ]);
         this.back();
     }
 }
 
 class DomainRoleHandler extends ManageHandler {
+    @requireSudo
     async get({ domainId }) {
         const roles = await domain.getRoles(domainId, true);
         this.response.template = 'domain_role.html';
         this.response.body = { roles, domain: this.domain };
     }
 
-    @param('role', Types.Name)
+    @param('role', Types.Role)
     async postAdd(domainId: string, role: string) {
         const roles = await domain.getRoles(this.domain);
         const rdict: Dictionary<any> = {};
         for (const r of roles) rdict[r._id] = r.perm;
         if (rdict[role]) throw new RoleAlreadyExistError(role);
-        await domain.addRole(domainId, role, rdict.default);
+        await Promise.all([
+            domain.addRole(domainId, role, rdict.default),
+            oplog.log(this, 'domain.addRole', { role }),
+        ]);
         this.back();
     }
 
-    @param('roles', Types.Array)
+    @requireSudo
+    @param('roles', Types.ArrayOf(Types.Role))
     async postDelete(domainId: string, roles: string[]) {
         if (Set.intersection(roles, ['root', 'default', 'guest']).size > 0) {
             throw new ValidationError('role', null, 'You cannot delete root, default or guest roles');
         }
-        await domain.deleteRoles(domainId, roles);
+        await Promise.all([
+            domain.deleteRoles(domainId, roles),
+            oplog.log(this, 'domain.deleteRoles', { roles }),
+        ]);
         this.back();
     }
 }
@@ -238,11 +222,13 @@ class DomainJoinApplicationsHandler extends ManageHandler {
             delete this.response.body.expirations[domain.JOIN_EXPIRATION_KEEP_CURRENT];
         }
         this.response.body.url_prefix = (this.domain.host || [])[0] || system.get('server.url');
+        if (!this.response.body.url_prefix.endsWith('/')) this.response.body.url_prefix += '/';
         this.response.template = 'domain_join_applications.html';
     }
 
+    @requireSudo
     @post('method', Types.Range([domain.JOIN_METHOD_NONE, domain.JOIN_METHOD_ALL, domain.JOIN_METHOD_CODE]))
-    @post('role', Types.Name, true)
+    @post('role', Types.Role, true)
     @post('expire', Types.Int, true)
     @post('invitationCode', Types.Content, true)
     async post(domainId: string, method: number, role: string, expire: number, invitationCode = '') {
@@ -324,9 +310,14 @@ class DomainJoinHandler extends Handler {
 }
 
 class DomainSearchHandler extends Handler {
-    @param('q', Types.Content)
-    async get(domainId: string, q: string) {
-        const ddocs = await domain.getPrefixSearch(q, 20);
+    @param('q', Types.Content, true)
+    async get(domainId: string, q: string = '') {
+        let ddocs: DomainDoc[] = [];
+        if (!q) {
+            const dudict = await domain.getDictUserByDomainId(this.user._id);
+            const dids = Object.keys(dudict);
+            ddocs = await domain.getMulti({ _id: { $in: dids } }).toArray();
+        } else ddocs = await domain.getPrefixSearch(q, 20);
         for (let i = 0; i < ddocs.length; i++) {
             ddocs[i].avatarUrl = ddocs[i].avatar ? avatar(ddocs[i].avatar, 64) : '/img/team_avatar.png';
         }
@@ -334,17 +325,46 @@ class DomainSearchHandler extends Handler {
     }
 }
 
-export async function apply() {
-    Route('ranking', '/ranking', DomainRankHandler, PERM.PERM_VIEW_RANKING);
-    Route('domain_dashboard', '/domain/dashboard', DomainDashboardHandler);
-    Route('domain_edit', '/domain/edit', DomainEditHandler);
-    Route('domain_user', '/domain/user', DomainUserHandler);
-    Route('domain_permission', '/domain/permission', DomainPermissionHandler);
-    Route('domain_role', '/domain/role', DomainRoleHandler);
-    Route('domain_group', '/domain/group', DomainUserGroupHandler);
-    Route('domain_join_applications', '/domain/join_applications', DomainJoinApplicationsHandler);
-    Route('domain_join', '/domain/join', DomainJoinHandler, PRIV.PRIV_USER_PROFILE);
-    Route('domain_search', '/domain/search', DomainSearchHandler, PRIV.PRIV_USER_PROFILE);
+export async function apply(ctx: Context) {
+    ctx.Route('ranking', '/ranking', DomainRankHandler, PERM.PERM_VIEW_RANKING);
+    ctx.Route('domain_dashboard', '/domain/dashboard', DomainDashboardHandler);
+    ctx.Route('domain_edit', '/domain/edit', DomainEditHandler);
+    ctx.Route('domain_user', '/domain/user', DomainUserHandler);
+    ctx.Route('domain_permission', '/domain/permission', DomainPermissionHandler);
+    ctx.Route('domain_role', '/domain/role', DomainRoleHandler);
+    ctx.Route('domain_group', '/domain/group', DomainUserGroupHandler);
+    ctx.Route('domain_join_applications', '/domain/join_applications', DomainJoinApplicationsHandler);
+    ctx.Route('domain_join', '/domain/join', DomainJoinHandler, PRIV.PRIV_USER_PROFILE);
+    ctx.Route('domain_search', '/domain/search', DomainSearchHandler, PRIV.PRIV_USER_PROFILE);
+    ctx.inject(['api'], ({ api }) => {
+        api.value('GroupInfo', [
+            ['name', 'String!'],
+            ['uids', '[Int]!'],
+        ]);
+        api.resolver('Query', 'domain(id: String)', 'Domain', async (args, c) => {
+            const ddoc = args.id ? await domain.get(args.id) : c.domain;
+            if (!ddoc) return null;
+            const udoc = await user.getById(ddoc._id, c.user._id);
+            if (!udoc.hasPerm(PERM.PERM_VIEW) && !udoc.hasPriv(PRIV.PRIV_VIEW_ALL_DOMAIN)) return null;
+            c.udoc = udoc;
+            return ddoc;
+        });
+        api.resolver('Domain', 'manage', 'DomainManage', async (args, c) => {
+            if (!c.udoc.hasPerm(PERM.PERM_EDIT_DOMAIN)) throw new PermissionError(PERM.PERM_EDIT_DOMAIN);
+            return c.parent;
+        });
+        api.resolver('DomainManage', 'group', 'DomainGroup', (args, c) => c.parent);
+        api.resolver(
+            'DomainGroup', 'list(uid: Int)', '[GroupInfo]',
+            (args, c) => user.listGroup(c.parent._id, args.uid),
+        );
+        api.resolver(
+            'DomainGroup', 'update(name: String!, uids: [Int]!)', 'Boolean',
+            async (args, c) => !!(await user.updateGroup(c.parent._id, args.name, args.uids)).upsertedCount,
+        );
+        api.resolver(
+            'DomainGroup', 'del(name: String!)', 'Boolean',
+            async (args, c) => !!(await user.delGroup(c.parent._id, args.name)).deletedCount,
+        );
+    });
 }
-
-global.Hydro.handler.domain = apply;

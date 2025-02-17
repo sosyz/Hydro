@@ -1,15 +1,17 @@
 import type { ProblemDoc } from 'hydrooj/src/interface';
 import PropTypes from 'prop-types';
 import React, { forwardRef } from 'react';
-import api, { gql } from 'vj/utils/api';
-import request from 'vj/utils/request';
+import { api, gql, request } from 'vj/utils';
 import AutoComplete, { AutoCompleteHandle, AutoCompleteProps } from './AutoComplete';
 
 const ProblemSelectAutoComplete = forwardRef<AutoCompleteHandle<ProblemDoc>, AutoCompleteProps<ProblemDoc>>((props, ref) => (
   <AutoComplete<ProblemDoc>
     ref={ref as any}
     cacheKey={`problem-${UiContext.domainId}`}
-    queryItems={(query) => request.get(`/d/${UiContext.domainId}/problem/list`, { prefix: query })}
+    queryItems={async (query) => {
+      const { pdocs } = await request.get(`/d/${UiContext.domainId}/p`, { q: query, quick: true });
+      return pdocs;
+    }}
     fetchItems={(ids) => api(gql`
       problems(ids: ${ids.map((i) => +i)}) {
         docId

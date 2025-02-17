@@ -1,5 +1,6 @@
-import { Dictionary } from 'lodash';
-import { FilterQuery } from 'mongodb';
+import { Dictionary, escapeRegExp } from 'lodash';
+import { LRUCache } from 'lru-cache';
+import { Filter } from 'mongodb';
 import { DomainDoc } from '../interface';
 import * as bus from '../service/bus';
 import db from '../service/db';
@@ -10,7 +11,7 @@ import UserModel, { deleteUserCache } from './user';
 
 const coll = db.collection('domain');
 const collUser = db.collection('domain.user');
-const collUnion = db.collection('domain.union');
+const cache = new LRUCache<string, DomainDoc>({ max: 1000, ttl: 300 * 1000 });
 
 interface DomainUserArg {
     _id: number,
@@ -18,6 +19,9 @@ interface DomainUserArg {
 }
 
 class DomainModel {
+    static coll = coll;
+    static collUser = collUser;
+
     static JOIN_METHOD_NONE = 0;
     static JOIN_METHOD_ALL = 1;
     static JOIN_METHOD_CODE = 2;
@@ -52,7 +56,7 @@ class DomainModel {
             roles: {},
             avatar: '',
         };
-        await bus.serial('domain/create', ddoc);
+        await bus.parallel('domain/create', ddoc);
         await coll.insertOne(ddoc);
         await DomainModel.setUserRole(domainId, owner, 'root');
         return domainId;
@@ -60,55 +64,71 @@ class DomainModel {
 
     @ArgMethod
     static async get(domainId: string): Promise<DomainDoc | null> {
-        const query: FilterQuery<DomainDoc> = { lower: domainId.toLowerCase() };
-        await bus.serial('domain/before-get', query);
+        domainId = domainId.toLowerCase();
+        const key = `id::${domainId}`;
+        if (cache.has(key)) return cache.get(key);
+        const query: Filter<DomainDoc> = { lower: domainId };
+        await bus.parallel('domain/before-get', query);
         const result = await coll.findOne(query);
-        if (result) await bus.serial('domain/get', result);
+        if (result) {
+            await bus.parallel('domain/get', result);
+            cache.set(key, result);
+        }
         return result;
     }
 
     @ArgMethod
     static async getByHost(host: string): Promise<DomainDoc | null> {
-        const query: FilterQuery<DomainDoc> = { host };
-        await bus.serial('domain/before-get', query);
+        const key = `host::${host}`;
+        // Note: cache by host might not be updated immediately
+        if (cache.has(key)) return cache.get(key);
+        const query: Filter<DomainDoc> = { host };
+        await bus.parallel('domain/before-get', query);
         const result = await coll.findOne(query);
-        if (result) await bus.serial('domain/get', result);
+        if (result) {
+            await bus.parallel('domain/get', result);
+            cache.set(key, result);
+        }
         return result;
     }
 
-    static getMulti(query: FilterQuery<DomainDoc> = {}) {
+    static getMulti(query: Filter<DomainDoc> = {}) {
         return coll.find(query);
     }
 
     static async edit(domainId: string, $set: Partial<DomainDoc>) {
-        await bus.serial('domain/before-update', domainId, $set);
-        const result = await coll.findOneAndUpdate({ _id: domainId }, { $set }, { returnDocument: 'after' });
-        if (result.value) await bus.serial('domain/update', domainId, $set, result.value);
+        domainId = domainId.toLowerCase();
+        await bus.parallel('domain/before-update', domainId, $set);
+        const result = await coll.findOneAndUpdate({ lower: domainId }, { $set }, { returnDocument: 'after' });
+        if (result.value) {
+            await bus.parallel('domain/update', domainId, $set, result.value);
+            bus.broadcast('domain/delete-cache', domainId);
+        }
         return result.value;
     }
 
     @ArgMethod
     static async inc(domainId: string, field: NumberKeys<DomainDoc>, n: number): Promise<number | null> {
+        domainId = domainId.toLowerCase();
         const res = await coll.findOneAndUpdate(
             { _id: domainId },
             { $inc: { [field]: n } as any },
             { returnDocument: 'after' },
         );
+        bus.broadcast('domain/delete-cache', domainId);
         return res.value?.[field];
     }
 
     @ArgMethod
     static async getList(domainIds: string[]) {
         const r: Record<string, DomainDoc | null> = {};
-        const tasks = [];
-        for (const domainId of domainIds) tasks.push(DomainModel.get(domainId).then((ddoc) => { r[domainId] = ddoc; }));
-        await Promise.all(tasks);
+        await Promise.all(domainIds.map((domainId) => DomainModel.get(domainId).then((ddoc) => { r[domainId] = ddoc; })));
         return r;
     }
 
     static async countUser(domainId: string, role?: string) {
-        if (role) return await collUser.find({ domainId, role }).count();
-        return await collUser.find({ domainId }).count();
+        if (role) return await collUser.countDocuments({ domainId, role });
+        return await collUser.countDocuments({ domainId });
     }
 
     @ArgMethod
@@ -119,8 +139,10 @@ class DomainModel {
             deleteUserCache(udoc);
             return res;
         }
-        const affected = await UserModel.getMulti({ _id: { $in: uid } }).project({ mail: 1, uname: 1 }).toArray();
-        affected.forEach((udoc) => deleteUserCache(udoc));
+        const affected = await UserModel.getMulti({ _id: { $in: uid } })
+            .project<{ _id: number, mail: string, uname: string }>({ mail: 1, uname: 1 })
+            .toArray();
+        for (const udoc of affected) deleteUserCache(udoc);
         return await collUser.updateMany({ domainId, uid: { $in: uid } }, { $set: { role } }, { upsert: true });
     }
 
@@ -153,17 +175,19 @@ class DomainModel {
     }
 
     static async setRoles(domainId: string, roles: Dictionary<bigint | string>) {
-        deleteUserCache(domainId);
         const current = await DomainModel.get(domainId);
         for (const role in roles) {
             current.roles[role] = roles[role].toString();
         }
+        deleteUserCache(domainId);
+        bus.broadcast('domain/delete-cache', domainId.toLowerCase());
         return await coll.updateOne({ _id: domainId }, { $set: { roles: current.roles } });
     }
 
     static async addRole(domainId: string, name: string, permission: bigint) {
         const current = await DomainModel.get(domainId);
         current.roles[name] = permission.toString();
+        bus.broadcast('domain/delete-cache', domainId.toLowerCase());
         return await coll.updateOne({ _id: domainId }, { $set: { roles: current.roles } });
     }
 
@@ -175,19 +199,24 @@ class DomainModel {
             collUser.updateMany({ domainId, role: { $in: roles } }, { $set: { role: 'default' } }),
         ]);
         deleteUserCache(domainId);
+        bus.broadcast('domain/delete-cache', domainId.toLowerCase());
     }
 
     static async getDomainUser(domainId: string, udoc: DomainUserArg) {
         let dudoc = await collUser.findOne({ domainId, uid: udoc._id });
-        dudoc = dudoc || {};
+        dudoc ||= { domainId, uid: udoc._id };
         if (!(udoc.priv & PRIV.PRIV_USER_PROFILE)) dudoc.role = 'guest';
         if (udoc.priv & PRIV.PRIV_MANAGE_ALL_DOMAIN) dudoc.role = 'root';
-        dudoc.role = dudoc.role || 'default';
+        dudoc.role ||= 'default';
         const ddoc = await DomainModel.get(domainId);
         dudoc.perm = ddoc?.roles[dudoc.role]
             ? BigInt(ddoc?.roles[dudoc.role])
             : BUILTIN_ROLES[dudoc.role];
         return dudoc;
+    }
+
+    static getDomainUserMulti(domainId: string, uids: number[]) {
+        return collUser.find({ domainId, uid: { $in: uids } });
     }
 
     static setMultiUserInDomain(domainId: string, query: any, params: any) {
@@ -239,7 +268,7 @@ class DomainModel {
 
     @ArgMethod
     static async getPrefixSearch(prefix: string, limit: number = 50) {
-        const $regex = new RegExp(prefix, 'mi');
+        const $regex = new RegExp(escapeRegExp(prefix), 'mi');
         const ddocs = await coll.find({
             $or: [{ _id: { $regex } }, { name: { $regex } }],
         }).limit(limit).toArray();
@@ -251,39 +280,28 @@ class DomainModel {
         await coll.deleteOne({ _id: domainId });
         await collUser.deleteMany({ domainId });
         await bus.parallel('domain/delete', domainId);
-    }
-
-    @ArgMethod
-    static async addUnion(domainId: string, union: string[]) {
-        return await collUnion.updateOne({ _id: domainId }, { $set: { union } }, { upsert: true });
-    }
-
-    @ArgMethod
-    static async removeUnion(domainId: string) {
-        return await collUnion.deleteOne({ _id: domainId });
-    }
-
-    @ArgMethod
-    static async getUnion(domainId: string) {
-        return await collUnion.findOne({ _id: domainId });
-    }
-
-    @ArgMethod
-    static async searchUnion(query) {
-        return await collUnion.find(query).toArray();
+        bus.broadcast('domain/delete-cache', domainId.toLowerCase());
     }
 }
 
-bus.once('app/started', async () => {
-    await db.ensureIndexes(
+bus.on('ready', () => Promise.all([
+    db.ensureIndexes(
         coll,
         { key: { lower: 1 }, name: 'lower', unique: true },
-    );
-    await db.ensureIndexes(
+    ),
+    db.ensureIndexes(
         collUser,
         { key: { domainId: 1, uid: 1 }, name: 'uid', unique: true },
         { key: { domainId: 1, rp: -1, uid: 1 }, name: 'rp', sparse: true },
-    );
+    ),
+]));
+bus.on('domain/delete-cache', async (domainId: string) => {
+    const ddoc = await DomainModel.get(domainId);
+    if (!ddoc) return;
+    for (const host of ddoc.hosts || []) {
+        cache.delete(`host::${host}`);
+    }
+    cache.delete(`id::${domainId}`);
 });
 export default DomainModel;
 global.Hydro.model.domain = DomainModel;

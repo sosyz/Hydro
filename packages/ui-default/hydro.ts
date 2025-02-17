@@ -4,21 +4,20 @@ import $ from 'jquery';
 import _ from 'lodash';
 import Notification from 'vj/components/notification';
 import PageLoader from 'vj/misc/PageLoader';
-import delay from 'vj/utils/delay';
+import { delay } from 'vj/utils';
 
 declare global {
   interface Window {
     UserContext: any;
     UiContext: any;
     Hydro: any;
-    // eslint-disable-next-line camelcase
-    node_modules: any;
+    /** @deprecated */
     externalModules: Record<string, string>;
+    captureException?: (e: Error) => void;
   }
 }
 
 const start = new Date();
-window.UserContext = JSON.parse(window.UserContext);
 
 function buildSequence(pages, type) {
   if (process.env.NODE_ENV !== 'production') {
@@ -26,8 +25,6 @@ function buildSequence(pages, type) {
       throw new Error("'type' should be one of 'before' or 'after'");
     }
   }
-  // eslint bug
-  // eslint-disable-next-line react/jsx-indent
   return pages
     .filter((p) => p && p[`${type}Loading`])
     .map((p) => ({
@@ -35,6 +32,16 @@ function buildSequence(pages, type) {
       func: p[`${type}Loading`],
       type,
     }));
+}
+
+function rounded() {
+  if (!UserContext.rounded) return;
+  const style = document.createElement('style');
+  style.innerHTML = `
+    .section { border-radius: 8px; }
+    .section__table-header { border-radius: 8px 8px 0 0; }
+  `;
+  document.head.append(style);
 }
 
 async function animate() {
@@ -55,10 +62,9 @@ async function animate() {
   }
 }
 
-async function load() {
-  for (const page of window.Hydro.preload) await eval(page); // eslint-disable-line no-eval
-
+export async function initPageLoader() {
   const pageLoader = new PageLoader();
+  rounded();
 
   const currentPageName = document.documentElement.getAttribute('data-page');
   const currentPage = pageLoader.getNamedPage(currentPageName);
@@ -104,5 +110,3 @@ async function load() {
   $('.section').trigger('vjLayout');
   $(document).trigger('vjPageFullyInitialized');
 }
-
-load();

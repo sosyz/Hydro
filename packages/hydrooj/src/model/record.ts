@@ -1,44 +1,55 @@
 /* eslint-disable object-curly-newline */
-import { omit, sum } from 'lodash';
+import { sum } from 'lodash';
 import moment from 'moment-timezone';
 import {
-    Collection, FilterQuery, MatchKeysAndValues,
-    ObjectID, OnlyFieldsOfType, PushOperator,
-    UpdateQuery,
+    Filter, FindOptions, MatchKeysAndValues,
+    ObjectId, OnlyFieldsOfType, PushOperator, UpdateFilter,
 } from 'mongodb';
+import { ProblemConfigFile } from '@hydrooj/common';
+import { Context } from '../context';
 import { ProblemNotFoundError } from '../error';
-import {
-    FileInfo, JudgeMeta, JudgeRequest, ProblemConfigFile, RecordDoc,
-} from '../interface';
-import * as bus from '../service/bus';
+import { JudgeMeta, RecordDoc } from '../interface';
 import db from '../service/db';
 import { MaybeArray, NumberKeys } from '../typeutils';
 import { ArgMethod, buildProjection, Time } from '../utils';
 import { STATUS } from './builtin';
+import DomainModel from './domain';
 import problem from './problem';
 import task from './task';
 
-class RecordModel {
-    static coll: Collection<RecordDoc> = db.collection('record');
+export default class RecordModel {
+    static coll = db.collection('record');
+    static collStat = db.collection('record.stat');
     static PROJECTION_LIST: (keyof RecordDoc)[] = [
         '_id', 'score', 'time', 'memory', 'lang',
         'uid', 'pid', 'rejudged', 'progress', 'domainId',
         'contest', 'judger', 'judgeAt', 'status', 'source',
-        'files',
+        'files', 'hackTarget',
     ];
+
+    static STAT_QUERY = {
+        time: [{ time: -1 }, { time: 1 }],
+        memory: [{ memory: -1 }, { memory: 1 }],
+        length: [{ length: -1 }, { length: 1 }],
+        date: [{ _id: -1 }, { _id: 1 }],
+    };
+
+    static RECORD_PRETEST = new ObjectId('000000000000000000000000');
+    static RECORD_GENERATE = new ObjectId('000000000000000000000001');
 
     static async submissionPriority(uid: number, base: number = 0) {
         const timeRecent = await RecordModel.coll
-            .find({ _id: { $gte: Time.getObjectID(moment().add(-30, 'minutes')) }, uid }).project({ time: 1, status: 1 }).toArray();
+            .find({ _id: { $gte: Time.getObjectID(moment().add(-30, 'minutes')) }, uid, rejudged: { $ne: true } })
+            .project({ time: 1, status: 1 }).toArray();
         const pending = timeRecent.filter((i) => [
-            STATUS.STATUS_FETCHED, STATUS.STATUS_COMPILING, STATUS.STATUS_JUDGING,
+            STATUS.STATUS_WAITING, STATUS.STATUS_FETCHED, STATUS.STATUS_COMPILING, STATUS.STATUS_JUDGING,
         ].includes(i.status)).length;
-        return base - ((pending * 1000 + 1) * (sum(timeRecent.map((i) => i.time || 0)) / 10000) + 1);
+        return Math.max(base - 10000, base - (pending * 1000 + 1) * (sum(timeRecent.map((i) => i.time || 0)) / 10000 + 1));
     }
 
-    static async get(_id: ObjectID): Promise<RecordDoc | null>;
-    static async get(domainId: string, _id: ObjectID): Promise<RecordDoc | null>;
-    static async get(arg0: string | ObjectID, arg1?: any) {
+    static async get(_id: ObjectId): Promise<RecordDoc | null>;
+    static async get(domainId: string, _id: ObjectId): Promise<RecordDoc | null>;
+    static async get(arg0: string | ObjectId, arg1?: any) {
         const _id = arg1 || arg0;
         const domainId = arg1 ? arg0 : null;
         const res = await RecordModel.coll.findOne({ _id });
@@ -49,6 +60,9 @@ class RecordModel {
 
     @ArgMethod
     static async stat(domainId?: string) {
+        // INFO:
+        // using .count() for a much better performace
+        // @see https://www.mongodb.com/docs/manual/reference/command/count/
         const [d5min, d1h, day, week, month, year, total] = await Promise.all([
             RecordModel.coll.find({ _id: { $gte: Time.getObjectID(moment().add(-5, 'minutes')) }, ...domainId ? { domainId } : {} }).count(),
             RecordModel.coll.find({ _id: { $gte: Time.getObjectID(moment().add(-1, 'hour')) }, ...domainId ? { domainId } : {} }).count(),
@@ -63,65 +77,70 @@ class RecordModel {
         };
     }
 
-    static async judge(domainId: string, rid: ObjectID, priority = 0, config: ProblemConfigFile = {}, meta: Partial<JudgeMeta> = {}) {
-        const rdoc = await RecordModel.get(domainId, rid);
-        if (!rdoc) return null;
-        let data: FileInfo[] = [];
-        let source = `${domainId}/${rdoc.pid}`;
-        meta = { ...meta, problemOwner: 1 };
-        if (rdoc.pid) {
-            let pdoc = await problem.get(rdoc.domainId, rdoc.pid);
-            if (!pdoc) throw new ProblemNotFoundError(rdoc.domainId, rdoc.pid);
-            if (pdoc.reference) {
-                pdoc = await problem.get(pdoc.reference.domainId, pdoc.reference.pid);
-                if (!pdoc) throw new ProblemNotFoundError(rdoc.domainId, rdoc.pid);
-            }
-            meta.problemOwner = pdoc.owner;
+    static async judge(
+        domainId: string, rids: MaybeArray<ObjectId> | RecordDoc, priority = 0,
+        config: ProblemConfigFile = {}, meta: Partial<JudgeMeta> = {},
+    ) {
+        let rdocs: RecordDoc[];
+        const _rids = rids instanceof Array ? rids
+            : (rids instanceof ObjectId) ? [rids]
+                : [rids._id];
+        if (!_rids.length) return null;
+        if (rids instanceof Array || rids instanceof ObjectId || ObjectId.isValid(rids.toString())) {
+            rdocs = await RecordModel.getMulti(domainId, { _id: { $in: _rids } }, { readPreference: 'primary' }).toArray();
+        } else rdocs = [rids];
+        if (!rdocs.length) return null;
+        let source = `${domainId}/${rdocs[0].pid}`;
+        let [pdoc] = await Promise.all([
+            problem.get(domainId, rdocs[0].pid),
+            task.deleteMany({ rid: { $in: _rids } }),
+        ]);
+        if (!pdoc) throw new ProblemNotFoundError(domainId, rdocs[0].pid);
+        if (pdoc.reference) {
+            pdoc = await problem.get(pdoc.reference.domainId, pdoc.reference.pid);
+            if (!pdoc) throw new ProblemNotFoundError(domainId, rdocs[0].pid);
             source = `${pdoc.domainId}/${pdoc.docId}`;
-            data = pdoc.data;
-            if (typeof pdoc.config === 'string') throw new Error(pdoc.config);
-            if (pdoc.config.type === 'remote_judge') {
-                if (rdoc.contest?.toHexString() !== '0'.repeat(24)) {
-                    return await task.add({
-                        ...omit(rdoc, ['_id']),
-                        priority,
-                        type: 'remotejudge',
-                        subType: pdoc.config.subType,
-                        target: pdoc.config.target,
-                        rid,
-                        domainId,
-                        config,
-                        data,
-                    });
-                }
-            }
         }
-        return await task.add({
-            ...omit(rdoc, ['_id']),
-            priority,
-            type: 'judge',
-            rid,
-            domainId,
-            config,
-            data,
-            source,
-            meta,
-        } as unknown as JudgeRequest);
+        meta = { ...meta, problemOwner: pdoc.owner };
+        const ddoc = await DomainModel.get(pdoc.domainId);
+        return await task.addMany(rdocs.map((rdoc) => {
+            let type = 'judge';
+            if (typeof pdoc.config === 'string') throw new Error(pdoc.config);
+            if (pdoc.config.type === 'remote_judge' && rdoc.contest?.toHexString() !== '0'.repeat(24)) type = 'remotejudge';
+            else if (meta?.type === 'generate') type = 'generate';
+            return ({
+                ...rdoc,
+                ...(pdoc.config as any), // TODO deprecate this
+                priority,
+                type,
+                rid: rdoc._id,
+                domainId,
+                config: {
+                    ...(pdoc.config as any),
+                    ...config,
+                },
+                data: pdoc.data,
+                source,
+                trusted: ddoc.isTrusted,
+                meta,
+            } as any);
+        }));
     }
 
     static async add(
         domainId: string, pid: number, uid: number,
         lang: string, code: string, addTask: boolean,
         args: {
-            contest?: ObjectID,
+            contest?: ObjectId,
             input?: string,
             files?: Record<string, string>,
-            type: 'judge' | 'contest' | 'pretest' | 'hack',
+            hackTarget?: ObjectId,
+            type: 'judge' | 'rejudge' | 'pretest' | 'hack' | 'generate',
         } = { type: 'judge' },
     ) {
         const data: RecordDoc = {
             status: STATUS.STATUS_WAITING,
-            _id: new ObjectID(),
+            _id: new ObjectId(),
             uid,
             code,
             lang,
@@ -137,33 +156,49 @@ class RecordModel {
             judgeAt: null,
             rejudged: false,
         };
+        let isContest = !!args.contest;
         if (args.contest) data.contest = args.contest;
         if (args.files) data.files = args.files;
-        if (args.type === 'pretest') {
+        if (args.hackTarget) data.hackTarget = args.hackTarget;
+        if (args.type === 'rejudge') {
+            args.type = 'judge';
+            data.rejudged = true;
+        } else if (args.type === 'pretest') {
             data.input = args.input || '';
-            data.contest = new ObjectID('000000000000000000000000');
+            isContest = false;
+            data.contest = RecordModel.RECORD_PRETEST;
+        } else if (args.type === 'generate') {
+            data.contest = RecordModel.RECORD_GENERATE;
         }
         const res = await RecordModel.coll.insertOne(data);
+        bus.broadcast('record/change', data);
         if (addTask) {
-            const priority = await RecordModel.submissionPriority(uid, args.type === 'pretest' ? -20 : (args.type === 'contest' ? 50 : 0));
-            await RecordModel.judge(domainId, res.insertedId, priority, args.type === 'contest' ? { detail: false } : {});
+            const priority = await RecordModel.submissionPriority(uid, args.type === 'pretest' ? -20 : (isContest ? 50 : 0));
+            await RecordModel.judge(domainId, data, priority, isContest ? { detail: false } : {}, {
+                type: args.type,
+                rejudge: data.rejudged,
+            });
         }
         return res.insertedId;
     }
 
-    static getMulti(domainId: string, query: any) {
+    static getMulti(domainId: string, query: any, options?: FindOptions) {
         if (domainId) query = { domainId, ...query };
-        return RecordModel.coll.find(query);
+        return RecordModel.coll.find(query, options);
+    }
+
+    static getMultiStat(domainId: string, query: any, sortBy: any = { _id: -1 }) {
+        return RecordModel.collStat.find({ domainId, ...query }).sort(sortBy);
     }
 
     static async update(
-        domainId: string, _id: MaybeArray<ObjectID>,
+        domainId: string, _id: MaybeArray<ObjectId>,
         $set?: MatchKeysAndValues<RecordDoc>,
         $push?: PushOperator<RecordDoc>,
         $unset?: OnlyFieldsOfType<RecordDoc, any, true | '' | 1>,
         $inc?: Partial<Record<NumberKeys<RecordDoc>, number>>,
     ): Promise<RecordDoc | null> {
-        const $update: UpdateQuery<RecordDoc> = {};
+        const $update: UpdateFilter<RecordDoc> = {};
         if ($set && Object.keys($set).length) $update.$set = $set;
         if ($push && Object.keys($push).length) $update.$push = $push;
         if ($unset && Object.keys($unset).length) $update.$unset = $unset;
@@ -180,16 +215,16 @@ class RecordModel {
             );
             return res.value || null;
         }
-        return await RecordModel.get(domainId, _id);
+        return await RecordModel.coll.findOne({ _id }, { readPreference: 'primary' });
     }
 
     static async updateMulti(
-        domainId: string, $match: FilterQuery<RecordDoc>,
+        domainId: string, $match: Filter<RecordDoc>,
         $set?: MatchKeysAndValues<RecordDoc>,
         $push?: PushOperator<RecordDoc>,
         $unset?: OnlyFieldsOfType<RecordDoc, any, true | '' | 1>,
     ) {
-        const $update: UpdateQuery<RecordDoc> = {};
+        const $update: UpdateFilter<RecordDoc> = {};
         if ($set && Object.keys($set).length) $update.$set = $set;
         if ($push && Object.keys($push).length) $update.$push = $push;
         if ($unset && Object.keys($unset).length) $update.$unset = $unset;
@@ -197,28 +232,31 @@ class RecordModel {
         return res.modifiedCount;
     }
 
-    static reset(domainId: string, rid: MaybeArray<ObjectID>, isRejudge: boolean) {
+    static async reset(domainId: string, rid: MaybeArray<ObjectId>, isRejudge: boolean) {
         const upd: any = {
             score: 0,
             status: STATUS.STATUS_WAITING,
             time: 0,
             memory: 0,
             testCases: [],
+            subtasks: {},
             judgeTexts: [],
             compilerTexts: [],
             judgeAt: null,
             judger: null,
         };
         if (isRejudge) upd.rejudged = true;
+        await RecordModel.collStat.deleteMany(rid instanceof Array ? { _id: { $in: rid } } : { _id: rid });
+        await task.deleteMany(rid instanceof Array ? { rid: { $in: rid } } : { rid });
         return RecordModel.update(domainId, rid, upd);
     }
 
     static count(domainId: string, query: any) {
-        return RecordModel.coll.find({ domainId, ...query }).count();
+        return RecordModel.coll.countDocuments({ domainId, ...query });
     }
 
     static async getList(
-        domainId: string, rids: ObjectID[], fields?: (keyof RecordDoc)[],
+        domainId: string, rids: ObjectId[], fields?: (keyof RecordDoc)[],
     ): Promise<Record<string, Partial<RecordDoc>>> {
         const r: Record<string, RecordDoc> = {};
         rids = Array.from(new Set(rids));
@@ -230,16 +268,47 @@ class RecordModel {
     }
 }
 
-// Mark problem as deleted
-bus.on('problem/delete', (domainId, docId) => RecordModel.coll.updateMany({ domainId, pid: docId }, { $set: { pid: -1 } }));
-bus.on('domain/delete', (domainId) => RecordModel.coll.deleteMany({ domainId }));
-
-bus.once('app/started', () => db.ensureIndexes(
-    RecordModel.coll,
-    { key: { domainId: 1, contest: 1, _id: -1 }, name: 'basic' },
-    { key: { domainId: 1, contest: 1, uid: 1, _id: -1 }, name: 'withUser' },
-    { key: { domainId: 1, contest: 1, pid: 1, _id: -1 }, name: 'withProblem' },
-));
-
-export default RecordModel;
+export function apply(ctx: Context) {
+    // Mark problem as deleted
+    ctx.on('problem/delete', (domainId, docId) => Promise.all([
+        RecordModel.coll.deleteMany({ domainId, pid: docId }),
+        RecordModel.collStat.deleteMany({ domainId, pid: docId }),
+    ]));
+    ctx.on('domain/delete', (domainId) => RecordModel.coll.deleteMany({ domainId }));
+    ctx.on('record/judge', async (rdoc, updated) => {
+        if (rdoc.status === STATUS.STATUS_ACCEPTED && updated) {
+            await RecordModel.collStat.updateOne({
+                _id: rdoc._id,
+            }, {
+                $set: {
+                    domainId: rdoc.domainId,
+                    pid: rdoc.pid,
+                    uid: rdoc.uid,
+                    time: rdoc.time,
+                    memory: rdoc.memory,
+                    length: rdoc.code?.length || 0,
+                    lang: rdoc.lang,
+                },
+            }, { upsert: true });
+        }
+    });
+    ctx.on('ready', () => Promise.all([
+        db.ensureIndexes(
+            RecordModel.coll,
+            { key: { domainId: 1, pid: 1 }, name: 'delete' },
+            { key: { domainId: 1, contest: 1, _id: -1 }, name: 'basic' },
+            { key: { domainId: 1, contest: 1, uid: 1, _id: -1 }, name: 'withUser' },
+            { key: { domainId: 1, contest: 1, pid: 1, _id: -1 }, name: 'withProblem' },
+            { key: { domainId: 1, contest: 1, pid: 1, uid: 1, _id: -1 }, name: 'withUserAndProblem' },
+            { key: { domainId: 1, contest: 1, status: 1, _id: -1 }, name: 'withStatus' },
+        ),
+        db.ensureIndexes(
+            RecordModel.collStat,
+            { key: { domainId: 1, pid: 1, uid: 1, _id: -1 }, name: 'basic' },
+            { key: { domainId: 1, pid: 1, uid: 1, time: 1 }, name: 'time' },
+            { key: { domainId: 1, pid: 1, uid: 1, memory: 1 }, name: 'memory' },
+            { key: { domainId: 1, pid: 1, uid: 1, length: 1 }, name: 'length' },
+        ),
+    ]) as any);
+}
 global.Hydro.model.record = RecordModel;

@@ -1,4 +1,3 @@
-import classNames from 'classnames';
 import PropTypes from 'prop-types';
 
 export default function DataInputComponent(props) {
@@ -10,14 +9,14 @@ export default function DataInputComponent(props) {
     className,
     ...rest
   } = props;
-  const cn = classNames(className, 'flex-col flex-fill');
   return (
-    <div {...rest} className={cn}>
+    <div {...rest} className={className} style={{ height: '100%', width: '100%' }}>
       {html ? (
         <div
           className="scratchpad__data-input"
           style={{ overflowY: 'scroll' }}
           wrap="off"
+          spellCheck="false"
         >
           {/* eslint-disable-next-line react/no-danger */}
           <pre dangerouslySetInnerHTML={{ __html: value }} contentEditable />
@@ -26,6 +25,7 @@ export default function DataInputComponent(props) {
         <textarea
           className="scratchpad__data-input"
           wrap="off"
+          spellCheck="false"
           value={value}
           onChange={(ev) => {
             ev.stopPropagation();

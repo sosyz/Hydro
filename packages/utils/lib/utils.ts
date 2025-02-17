@@ -1,12 +1,26 @@
 import crypto from 'crypto';
 import os from 'os';
 import path from 'path';
-import { Duplex } from 'stream';
+import { Duplex, PassThrough } from 'stream';
 import { inspect } from 'util';
+import type AdmZip from 'adm-zip';
 import fs from 'fs-extra';
-import type { Moment } from 'moment-timezone';
-import { isMoment } from 'moment-timezone';
-import { ObjectID } from 'mongodb';
+import moment, { isMoment, Moment } from 'moment-timezone';
+import { ObjectId } from 'mongodb';
+import Logger from 'reggol';
+import type * as superagent from 'superagent';
+export * as yaml from 'js-yaml';
+export * as fs from 'fs-extra';
+
+Logger.levels.base = process.env.DEV ? 3 : 2;
+Logger.targets[0].showTime = 'dd hh:mm:ss';
+Logger.targets[0].label = {
+    align: 'right',
+    width: 9,
+    margin: 1,
+};
+
+export { Logger, moment };
 
 const encrypt = (algorithm, content) => crypto.createHash(algorithm).update(content).digest('hex');
 export const sha1 = (content: string) => encrypt('sha1', content);
@@ -24,9 +38,7 @@ export function folderSize(folderPath: string) {
                 size += stats.size;
                 const files = fs.readdirSync(p);
                 if (Array.isArray(files)) {
-                    files.forEach((file) => {
-                        _next(path.join(p, file));
-                    });
+                    for (const file of files) _next(path.join(p, file));
                 }
             }
         }
@@ -51,16 +63,17 @@ String.prototype.format = function formatStr(...args) {
             }
         } else return this.formatFromArray(args);
     }
-    return result;
+    return result.toString();
 };
 
-export function isClass(obj: any, strict = false) {
+export function isClass(obj: any, strict = false): obj is new (...args: any) => any {
     if (typeof obj !== 'function') return false;
-    const str = obj.toString();
     if (obj.prototype === undefined) return false;
-    if (obj.prototype.constructor !== obj) return false;
-    if (str.slice(0, 5) === 'class') return true;
+    // FIXME cordis proxies the object and make this assertion fail
+    // if (obj.prototype.constructor !== obj) return false;
     if (Object.getOwnPropertyNames(obj.prototype).length >= 2) return true;
+    const str = obj.toString();
+    if (str.slice(0, 5) === 'class') return true;
     if (/^function\s+\(|^function\s+anonymous\(/.test(str)) return false;
     if (strict && /^function\s+[A-Z]/.test(str)) return true;
     if (/\b\(this\b|\bthis[.[]\b/.test(str)) {
@@ -70,7 +83,16 @@ export function isClass(obj: any, strict = false) {
     return false;
 }
 
-export function streamToBuffer(stream: any, maxSize = 0): Promise<Buffer> {
+function isSuperagentRequest(t: NodeJS.ReadableStream | superagent.Request): t is superagent.Request {
+    return 'req' in t;
+}
+export function streamToBuffer(input: NodeJS.ReadableStream | superagent.Request, maxSize = 0): Promise<Buffer> {
+    let stream: NodeJS.ReadableStream;
+    if (isSuperagentRequest(input)) {
+        const s = new PassThrough();
+        input.pipe(s);
+        stream = s;
+    } else stream = input;
     return new Promise((resolve, reject) => {
         const buffers = [];
         let length = 0;
@@ -95,35 +117,6 @@ export function bufferToStream(buffer: Buffer): NodeJS.ReadableStream {
     return stream;
 }
 
-export function sleep(timeout: number) {
-    return new Promise((resolve) => {
-        setTimeout(() => resolve(true), timeout);
-    });
-}
-
-function deepen(modifyString: (source: string) => string) {
-    function modifyObject<T>(source: T): T {
-        if (typeof source !== 'object' || !source) return source;
-        if (Array.isArray(source)) return source.map(modifyObject) as any;
-        const result = {} as T;
-        for (const key in source) {
-            result[modifyString(key)] = modifyObject(source[key]);
-        }
-        return result;
-    }
-
-    return function t<T>(source: T): T {
-        if (typeof source === 'string') return modifyString(source) as any;
-        return modifyObject(source);
-    };
-}
-
-export function noop() { }
-
-export const camelCase = deepen((source) => source.replace(/[_-][a-z]/g, (str) => str.slice(1).toUpperCase()));
-export const paramCase = deepen((source) => source.replace(/_/g, '-').replace(/(?<!^)[A-Z]/g, (str) => `-${str.toLowerCase()}`));
-export const snakeCase = deepen((source) => source.replace(/-/g, '_').replace(/(?<!^)[A-Z]/g, (str) => `_${str.toLowerCase()}`));
-
 export namespace Time {
     export const second = 1000;
     export const minute = second * 60;
@@ -145,13 +138,29 @@ export namespace Time {
         else if (isMoment(timestamp)) _timestamp = timestamp.toDate().getTime();
         else _timestamp = timestamp.getTime();
         const hexSeconds = Math.floor(_timestamp / 1000).toString(16);
-        return new ObjectID(`${hexSeconds}${allZero ? '0000000000000000' : new ObjectID().toHexString().substr(8)}`);
+        return new ObjectId(`${hexSeconds}${allZero ? '0000000000000000' : new ObjectId().toHexString().substring(8)}`);
     }
 }
 
 export function errorMessage(err: Error | string) {
     const t = typeof err === 'string' ? err : err.stack;
-    const parsed = t
+    const lines = t.split('\n')
+        .filter((i) => !i.includes(' (node:') && !i.includes('(internal'));
+    let cursor = 1;
+    let count = 0;
+    while (cursor < lines.length) {
+        if (lines[cursor] !== lines[cursor - 1]) {
+            if (count) {
+                lines[cursor - 1] += ` [+${count}]`;
+                count = 0;
+            }
+            cursor++;
+        } else {
+            count++;
+            lines.splice(cursor, 1);
+        }
+    }
+    const parsed = lines.join('\n')
         .replace(/[A-Z]:\\.+\\@hydrooj\\/g, '@hydrooj\\')
         .replace(/\/.+\/@hydrooj\//g, '\\')
         .replace(/[A-Z]:\\.+\\hydrooj\\/g, 'hydrooj\\')
@@ -162,20 +171,6 @@ export function errorMessage(err: Error | string) {
     if (typeof err === 'string') return parsed;
     err.stack = parsed;
     return err;
-}
-
-function _digit2(number: number) {
-    return number < 10 ? `0${number}` : number.toString();
-}
-
-export function formatSeconds(_seconds: string | number = '0', showSeconds = true) {
-    const seconds = +_seconds;
-    let res = '{0}:{1}'.format(
-        showSeconds ? _digit2(Math.floor(seconds / 3600)) : Math.floor(seconds / 3600),
-        _digit2(Math.floor((seconds % 3600) / 60)),
-    );
-    if (showSeconds) res += `:${_digit2(seconds % 60)}`;
-    return res;
 }
 
 export function changeErrorType(err: any, Err: any) {
@@ -262,38 +257,13 @@ export function CallableInstance(property = '__call__') {
     else func = this.constructor.prototype[property];
     const apply = function __call__(...args) { return func.apply(apply, ...args); };
     Object.setPrototypeOf(apply, this.constructor.prototype);
-    Object.getOwnPropertyNames(func).forEach((p) => {
+    for (const p of Object.getOwnPropertyNames(func)) {
         Object.defineProperty(apply, p, Object.getOwnPropertyDescriptor(func, p));
-    });
+    }
     return apply;
 }
 
 CallableInstance.prototype = Object.create(Function.prototype);
-
-const fSortR = /[^\d]+|\d+/g;
-export function sortFiles(files: { _id: string }[] | string[]) {
-    if (!files?.length) return [];
-    const isString = typeof files[0] === 'string';
-    const result = files
-        .map((i) => (isString ? { name: i, weights: i.match(fSortR) } : { ...i, weights: (i._id || i.name).match(fSortR) }))
-        .sort((a, b) => {
-            let pos = 0;
-            const weightsA = a.weights;
-            const weightsB = b.weights;
-            let weightA = weightsA[pos];
-            let weightB = weightsB[pos];
-            while (weightA && weightB) {
-                const v = weightA - weightB;
-                if (!Number.isNaN(v) && v !== 0) return v;
-                if (weightA !== weightB) return weightA > weightB ? 1 : -1;
-                pos += 1;
-                weightA = weightsA[pos];
-                weightB = weightsB[pos];
-            }
-            return weightA ? 1 : -1;
-        });
-    return isString ? result.map((x) => x.name) : result;
-}
 
 export const htmlEncode = (str: string) => str.replace(/[&<>'"]/g,
     (tag: string) => ({
@@ -311,6 +281,75 @@ export function Counter<T extends (string | number) = string>() {
             return target[prop];
         },
     }) as Record<T, number>;
+}
+
+function canonical(p: string) {
+    if (!p) return '';
+    const safeSuffix = path.posix.normalize(`/${p.split('\\').join('/')}`);
+    return path.join('.', safeSuffix);
+}
+
+function sanitize(prefix: string, name: string) {
+    prefix = path.resolve(path.normalize(prefix));
+    const parts = name.split('/');
+    for (let i = 0, l = parts.length; i < l; i++) {
+        const p = path.normalize(path.join(prefix, parts.slice(i, l).join(path.sep)));
+        if (p.indexOf(prefix) === 0) {
+            return p;
+        }
+    }
+    return path.normalize(path.join(prefix, path.basename(name)));
+}
+
+export function sanitizePath(pathname: string) {
+    const parts = pathname.replace(/\\/g, '/').split('/').filter((i) => i && i !== '.' && i !== '..');
+    return parts.join(path.sep);
+}
+
+/* eslint-disable no-await-in-loop */
+export async function extractZip(zip: AdmZip, dest: string, overwrite = false, strip = false) {
+    const entries = zip.getEntries();
+    const shouldStrip = strip ? entries.every((i) => i.entryName.startsWith(entries[0].entryName)) : false;
+    for (const entry of entries) {
+        const name = shouldStrip ? entry.entryName.substring(entries[0].entryName.length) : entry.entryName;
+        const d = sanitize(dest, canonical(name));
+        if (entry.isDirectory) {
+            await fs.mkdir(d, { recursive: true });
+            continue;
+        }
+        const content = entry.getData();
+        if (!content) throw new Error('CANT_EXTRACT_FILE');
+        if (!fs.existsSync(d) || overwrite) await fs.writeFile(d, content);
+        await fs.utimes(d, entry.header.time, entry.header.time);
+    }
+}
+
+export async function pipeRequest(req: superagent.Request, w: fs.WriteStream, timeout?: number, name?: string) {
+    try {
+        await new Promise((resolve, reject) => {
+            w.on('finish', () => {
+                resolve(null);
+            });
+            req.buffer(false).timeout({
+                response: Math.min(10000, timeout),
+                deadline: timeout,
+            }).parse((resp, cb) => {
+                if (resp.statusCode !== 200) throw new Error(`${resp.statusCode}`);
+                else {
+                    resp.pipe(w);
+                    resp.on('end', () => {
+                        cb(null, undefined);
+                    });
+                    resp.on('error', (err) => {
+                        cb(err, undefined);
+                        reject(err);
+                    });
+                }
+            }).catch(reject);
+        });
+    } catch (e) {
+        throw new Error(`Download${e.errno === 'ETIMEDOUT' ? 'Timedout' : 'Error'}(${name ? `${name}, ` : ''}${e.message})`);
+    }
 }
 
 export * from '@hydrooj/utils/lib/common';

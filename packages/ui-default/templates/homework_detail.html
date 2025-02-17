@@ -2,13 +2,15 @@
 {% import "components/record.html" as record with context %}
 {% import "components/problem.html" as problem with context %}
 {% block content %}
+{{ set(UiContext, 'tdoc', tdoc) }}
+{{ set(UiContext, 'tsdoc', tsdoc) }}
 <div class="row">
   <div class="medium-9 columns">
     <div class="section">
       <div class="section__header">
         <h1 class="section__title">{{ _('Homework Introduction') }}</h1>
       </div>
-      <div class="section__body typo">
+      <div class="section__body typo richmedia">
         {{ tdoc['content']|markdown|safe }}
       </div>
     </div>
